@@ -4,7 +4,7 @@ description: 'Review changed code for reuse, quality, and efficiency, then fix a
 button:
   label: Simplify
   icon: sparkle
-  order: 2
+  order: 1
   submit: send
 ---
 
