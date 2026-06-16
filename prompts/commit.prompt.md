@@ -1,6 +1,11 @@
 ---
 name: commit
 description: 'Create a git commit following Conventional Commits, based strictly on the actual local diff rather than conversation context.'
+button:
+  label: Commit
+  icon: git-commit
+  order: 1
+  submit: send
 ---
 
 # Commit: Standard Git Commit from Local Changes

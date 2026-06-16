@@ -1,6 +1,11 @@
 ---
 name: simplify
 description: 'Review changed code for reuse, quality, and efficiency, then fix any issues found.'
+button:
+  label: Simplify
+  icon: sparkle
+  order: 2
+  submit: send
 ---
 
 # Simplify: Code Review and Cleanup

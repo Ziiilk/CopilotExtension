@@ -1,0 +1,4 @@
+oh-my-copilot.vsix
+.vscode/**
+**/*.map
+.gitignore

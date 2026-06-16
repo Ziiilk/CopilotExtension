@@ -1,0 +1,61 @@
+{
+  "name": "oh-my-copilot-panel",
+  "displayName": "Oh My Copilot Panel",
+  "description": "A row of text buttons under Copilot Chat that run your *.prompt.md files as /commands.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "ohMyCopilotContainer",
+          "title": "Oh My Copilot",
+          "icon": "$(rocket)"
+        }
+      ]
+    },
+    "views": {
+      "ohMyCopilotContainer": [
+        {
+          "type": "webview",
+          "id": "ohMyCopilot.panel",
+          "name": "Oh My Copilot",
+          "icon": "$(rocket)"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "ohMyCopilot.enableInjection",
+        "title": "Oh My Copilot: 刷新命令"
+      },
+      {
+        "command": "ohMyCopilot.restoreDefault",
+        "title": "Oh My Copilot: 清空命令"
+      }
+    ],
+    "configuration": {
+      "title": "Oh My Copilot Panel",
+      "properties": {
+        "ohMyCopilot.promptFolders": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra folders to scan for *.prompt.md files. The VS Code user prompts folder is always scanned. Supports absolute paths and ${workspaceFolder}."
+        }
+      }
+    }
+  }
+}
