@@ -47,10 +47,10 @@ Check whether a tag for this exact version already exists
 
 ## Phase 3: Create the Local Tag
 
-Create the tag **locally only** on the current commit (HEAD). Use an annotated
-tag (`git tag -a "<tag>" -m "<message>"`) with a concise message referencing the
-version. **Do not push the tag** to any remote and do not create or move tags on
-a remote — this is a local-only operation.
+Create the tag **locally only** on the current commit (HEAD). Use a lightweight
+tag (`git tag "<tag>"`) — do not use `-a` or `-m`. **Do not push the tag** to
+any remote and do not create or move tags on a remote — this is a local-only
+operation.
 
 ## Phase 4: Confirm
 
