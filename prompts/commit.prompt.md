@@ -4,7 +4,7 @@ description: 'Create a git commit following Conventional Commits, based strictly
 button:
   label: Commit
   icon: git-commit
-  order: 2
+  order: 3
   submit: send
 ---
 
