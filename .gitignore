@@ -1,6 +1,6 @@
 # Build artifacts
 extension/*.vsix
-extension/media/omc-inject.js
+extension/media/cpx-inject.js
 
 # Node
 node_modules/

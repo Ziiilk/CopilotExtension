@@ -1,33 +1,30 @@
-# Oh My Copilot
+# Copilot Extension
 
 代码审查与提交辅助 prompt + 一个把命令渲染成 Chat 输入框按钮的 VS Code 扩展。命令列表由一个独立的 JSON 配置文件定义。
 
 ## 安装与更新
 
-一个脚本 [`install.ps1`](install.ps1) 同时管理 **prompts** 和 **扩展**，重复运行即更新到当前仓库状态。
+[`install.ps1`](install.ps1) 只做一件事：打包并（重新）安装**扩展**。prompt 文件随扩展打包，由扩展在激活时自动装到用户 prompts 目录——无需脚本单独处理。
 
 ```powershell
-# prompts + 扩展（默认）
 powershell -ExecutionPolicy Bypass -File .\install.ps1
-
-# 只更新 prompts
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Prompts
-
-# 只更新扩展
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Extension
 ```
 
 脚本做的事：
 
-- **Prompts** → 复制 `prompts\*` 到 VS Code 用户 prompts 目录
+- 用 `vsce` 把 `extension/` 打包成 `.vsix`，先卸载旧版再安装（确保同版本号也会重新解包）。
+
+扩展激活（Reload 后）会做的事：
+
+- 把打包进扩展的 `extension/prompts/*.prompt.md` 安装到 VS Code 用户 prompts 目录
   （Windows `%APPDATA%\Code\User\prompts\`；macOS `~/Library/Application Support/Code/User/prompts/`；
-  Linux `~/.config/Code/User/prompts/`）。
-- **扩展** → 用 `vsce` 打包成 `.vsix`，先卸载旧版再安装（确保同版本号也会重新解包）。
+  Linux `~/.config/Code/User/prompts/`）。目录路径由 `globalStorageUri` 反推，跨平台/跨 VS Code 版本通用。
+  仅在文件缺失或内容变化时写入，故扩展升级会自动更新 prompts。
 
 运行后：
 
-1. `Developer: Reload Window` 重载窗口。
-2. 打开「Oh My Copilot」面板点 **应用配置**，把按钮（重新）应用到 Chat 输入框上方。
+1. `Developer: Reload Window` 重载窗口（此时安装打包的 prompts 并注册面板）。
+2. 打开「Copilot Extension」面板点 **应用配置**，把按钮（重新）应用到 Chat 输入框上方。
    扩展版本变化会改变注入文件路径，故每次更新扩展后需点一次应用配置。
 
 前置依赖：`node` / `npx`（用于 `vsce` 打包）、VS Code 的 `code` CLI 在 PATH 中、
@@ -37,17 +34,17 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Extension
 
 | 改了什么 | 怎么更新 |
 |---|---|
-| 仅 prompt 内容（`*.prompt.md` 正文） | `install.ps1 -Prompts` → Reload Window（slash 命令即刻可用） |
+| prompt 内容（`extension/prompts/*.prompt.md`） | `install.ps1` → Reload Window（扩展激活时重装 prompts） |
 | 命令按钮配置（`commands.json` 增删/改名/排序/图标） | 面板「编辑配置」改 JSON → 面板「应用配置」 |
-| 扩展代码（`extension/`） | bump `extension/package.json` 的 `version` → `install.ps1 -Extension` → Reload → 「应用配置」 |
+| 扩展代码（`extension/`） | `install.ps1` → Reload → 「应用配置」 |
 | 想关闭输入框按钮 | 面板「恢复默认」→ 按提示重载 |
 | **卸载扩展** | 先点面板「恢复默认」恢复默认 Chat，再卸载扩展（见下方「卸载」） |
 
 > 发布到团队/他人：本扩展 `publisher` 为 `local`，走本地 `.vsix` 安装而非 Marketplace。
 > `.vsix` 是构建产物（已被 `.gitignore` 忽略，不入库）。分发方式二选一：
 > ① 把整个仓库给对方，对方运行 `install.ps1`（脚本会现场打包安装）；
-> ② 自己运行 `install.ps1 -Extension` 生成 `extension/oh-my-copilot.vsix`，单独把这个
-> 文件发给对方，对方 `code --install-extension oh-my-copilot.vsix`。
+> ② 自己运行 `install.ps1` 生成 `extension/copilot-extension.vsix`，单独把这个
+> 文件发给对方，对方 `code --install-extension copilot-extension.vsix`（prompts 随扩展一起装）。
 
 ## What's Included
 
@@ -71,12 +68,12 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Extension
 
 输入框上方的按钮通过 `Custom CSS and JS Loader`（`be5invis.vscode-custom-css`）
 注入实现——VS Code 不提供官方 API 把自定义按钮放进 Chat 输入框，故采用该扩展加载
-一段由本扩展自动生成的脚本（`extension/media/omc-inject.js`）。
+一段由本扩展自动生成的脚本（`extension/media/cpx-inject.js`）。
 
 启用步骤：
 
 1. 安装 `Custom CSS and JS Loader` 扩展。
-2. 打开「Oh My Copilot」面板，点 **应用配置**——它会写入配置、触发 Custom CSS 应用补丁。
+2. 打开「Copilot Extension」面板，点 **应用配置**——它会写入配置、触发 Custom CSS 应用补丁。
 3. 按提示确认（首次会弹「安装似乎已损坏」横幅，点齿轮忽略；可能需要管理员权限），然后重载窗口。
 
 > 注意：这是非官方注入。VS Code 升级后 Custom CSS 补丁会失效，重新点一次「应用配置」即可。
@@ -89,12 +86,12 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Extension
 
 所以卸载前请手动清理：
 
-1. 打开「Oh My Copilot」面板，点 **恢复默认** → 按提示重载窗口（移除注入的按钮脚本，
+1. 打开「Copilot Extension」面板，点 **恢复默认** → 按提示重载窗口（移除注入的按钮脚本，
    并从 `vscode_custom_css.imports` 移除配置）。
 2. 然后再卸载扩展。
 
 若先卸载了才想起没清理：在 `Custom CSS and JS Loader` 里运行 **Disable Custom CSS and JS**，
-并手动从 `settings.json` 删掉 `vscode_custom_css.imports` 里含 `omc-inject.js` 的那条即可。
+并手动从 `settings.json` 删掉 `vscode_custom_css.imports` 里含 `cpx-inject.js` 的那条即可。
 
 #### 命令配置（`commands.json`）
 
@@ -102,9 +99,12 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Extension
 每个按钮是一个**宏**：`text` 就是点击时插入 Chat 的文本——以 `/` 开头即为 slash
 命令（如 `/commit`），否则就是一段直接发给 Copilot 的 prompt。文件存于扩展的 globalStorage：
 
-- Windows `%APPDATA%\Code\User\globalStorage\local.oh-my-copilot-panel\commands.json`
+- Windows `%APPDATA%\Code\User\globalStorage\local.copilot-extension-panel\commands.json`
 
-首次运行会自动写入默认配置。点面板「编辑配置」可直接在 VS Code 中打开它，改完点「应用配置」生效。
+默认配置随扩展打包（[`extension/commands.json`](extension/commands.json)）：首次运行扩展时，若 globalStorage 里还没有
+`commands.json`，扩展会用这份打包的默认值种子它（扩展代码本身不硬编码任何命令）。
+点面板「编辑配置」可直接在 VS Code 中打开 globalStorage 里的副本，改完点「应用配置」生效。
+想改默认值（影响全新安装）就改 `extension/commands.json` 后重新安装扩展。
 
 格式为 `{ "commands": [...] }`（也兼容顶层数组），按钮顺序即列表顺序：
 

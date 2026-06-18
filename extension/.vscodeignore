@@ -1,4 +1,4 @@
-oh-my-copilot.vsix
+copilot-extension.vsix
 .vscode/**
 **/*.map
 .gitignore

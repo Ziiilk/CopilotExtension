@@ -1,6 +1,6 @@
 {
-  "name": "oh-my-copilot-panel",
-  "displayName": "Oh My Copilot Panel",
+  "name": "copilot-extension-panel",
+  "displayName": "Copilot Extension Panel",
   "description": "A row of text buttons under Copilot Chat that run your *.prompt.md files as /commands.",
   "version": "0.1.0",
   "publisher": "local",
@@ -18,34 +18,34 @@
     "viewsContainers": {
       "panel": [
         {
-          "id": "ohMyCopilotContainer",
-          "title": "Oh My Copilot",
+          "id": "copilotExtensionContainer",
+          "title": "Copilot Extension",
           "icon": "$(rocket)"
         }
       ]
     },
     "views": {
-      "ohMyCopilotContainer": [
+      "copilotExtensionContainer": [
         {
           "type": "webview",
-          "id": "ohMyCopilot.panel",
-          "name": "Oh My Copilot",
+          "id": "copilotExtension.panel",
+          "name": "Copilot Extension",
           "icon": "$(rocket)"
         }
       ]
     },
     "commands": [
       {
-        "command": "ohMyCopilot.enableInjection",
-        "title": "Oh My Copilot: 应用配置"
+        "command": "copilotExtension.enableInjection",
+        "title": "Copilot Extension: 应用配置"
       },
       {
-        "command": "ohMyCopilot.restoreDefault",
-        "title": "Oh My Copilot: 恢复默认"
+        "command": "copilotExtension.restoreDefault",
+        "title": "Copilot Extension: 恢复默认"
       },
       {
-        "command": "ohMyCopilot.editConfig",
-        "title": "Oh My Copilot: 编辑配置"
+        "command": "copilotExtension.editConfig",
+        "title": "Copilot Extension: 编辑配置"
       }
     ]
   }
