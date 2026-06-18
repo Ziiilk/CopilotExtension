@@ -76,7 +76,7 @@ Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host "  1. Reload VS Code: command palette -> 'Developer: Reload Window'."
 if ($Extension) {
-    Write-Host "  2. Open the 'Oh My Copilot' panel and click '刷新命令' to (re)apply the"
+    Write-Host "  2. Open the 'Oh My Copilot' panel and click '应用配置' to (re)apply the"
     Write-Host "     Chat input-box buttons. The injected file path changes whenever the"
     Write-Host "     extension version changes, so a refresh is needed after each update."
 }

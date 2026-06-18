@@ -37,25 +37,16 @@
     "commands": [
       {
         "command": "ohMyCopilot.enableInjection",
-        "title": "Oh My Copilot: 刷新命令"
+        "title": "Oh My Copilot: 应用配置"
       },
       {
         "command": "ohMyCopilot.restoreDefault",
-        "title": "Oh My Copilot: 清空命令"
+        "title": "Oh My Copilot: 恢复默认"
+      },
+      {
+        "command": "ohMyCopilot.editConfig",
+        "title": "Oh My Copilot: 编辑配置"
       }
-    ],
-    "configuration": {
-      "title": "Oh My Copilot Panel",
-      "properties": {
-        "ohMyCopilot.promptFolders": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra folders to scan for *.prompt.md files. The VS Code user prompts folder is always scanned. Supports absolute paths and ${workspaceFolder}."
-        }
-      }
-    }
+    ]
   }
 }

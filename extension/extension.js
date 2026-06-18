@@ -1,174 +1,89 @@
 const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 
 /**
- * Resolve the VS Code user prompts folder for the current OS / product.
- * @returns {string[]}
+ * @typedef {{ command: string, label: string, icon: string, submit: string, description: string }} CommandButton
  */
-function defaultPromptFolders() {
-  const home = os.homedir();
-  /** @type {string[]} */
-  const candidates = [];
-  if (process.platform === 'win32') {
-    const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
-    candidates.push(path.join(appData, 'Code', 'User', 'prompts'));
-    candidates.push(path.join(appData, 'Code - Insiders', 'User', 'prompts'));
-  } else if (process.platform === 'darwin') {
-    const base = path.join(home, 'Library', 'Application Support');
-    candidates.push(path.join(base, 'Code', 'User', 'prompts'));
-    candidates.push(path.join(base, 'Code - Insiders', 'User', 'prompts'));
-  } else {
-    const base = process.env.XDG_CONFIG_HOME || path.join(home, '.config');
-    candidates.push(path.join(base, 'Code', 'User', 'prompts'));
-    candidates.push(path.join(base, 'Code - Insiders', 'User', 'prompts'));
-  }
-  return candidates;
-}
 
 /**
- * Resolve all folders to scan, expanding ${workspaceFolder}.
- * @returns {string[]}
- */
-function resolveFolders() {
-  const folders = new Set(defaultPromptFolders());
-  const extra = vscode.workspace.getConfiguration('ohMyCopilot').get('promptFolders') || [];
-  const wsFolder =
-    vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0]
-      ? vscode.workspace.workspaceFolders[0].uri.fsPath
-      : '';
-  for (const f of extra) {
-    if (typeof f !== 'string' || !f.trim()) continue;
-    folders.add(f.replace(/\$\{workspaceFolder\}/g, wsFolder));
-  }
-  return [...folders];
-}
-
-/**
- * Strip a single pair of matching surrounding quotes.
- * @param {string} v
+ * Absolute path to the JSON config that defines the command buttons. Stored in
+ * the extension's global storage so it persists across updates and is easy to
+ * open via the panel's "编辑配置" button.
+ * @param {vscode.ExtensionContext} context
  * @returns {string}
  */
-function unquote(v) {
-  if (
-    (v.startsWith('"') && v.endsWith('"')) ||
-    (v.startsWith("'") && v.endsWith("'"))
-  ) {
-    return v.slice(1, -1);
-  }
-  return v;
+function configPath(context) {
+  return path.join(context.globalStorageUri.fsPath, 'commands.json');
 }
 
 /**
- * Parse the YAML-ish frontmatter block of a prompt file. Supports flat
- * `key: value` pairs and one level of nesting (an empty `key:` followed by
- * indented `  subkey: value` lines becomes an object).
- * @param {string} content
- * @returns {Record<string, string | Record<string, string>>}
+ * The default config written when none exists yet.
+ * @returns {{ commands: CommandButton[] }}
  */
-function parseFrontmatter(content) {
-  /** @type {Record<string, string | Record<string, string>>} */
-  const result = {};
-  const match = content.match(/^\uFEFF?---\r?\n([\s\S]*?)\r?\n---/);
-  if (!match) return result;
-  const lines = match[1].split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const top = lines[i].match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
-    if (!top) continue;
-    const key = top[1];
-    const value = top[2].trim();
-    if (value !== '') {
-      result[key] = unquote(value);
-      continue;
-    }
-    // Empty value: gather an indented nested block, if any.
-    /** @type {Record<string, string>} */
-    const nested = {};
-    let consumed = 0;
-    for (let j = i + 1; j < lines.length; j++) {
-      const sub = lines[j].match(/^(\s+)([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
-      if (!sub) break;
-      nested[sub[2]] = unquote(sub[3].trim());
-      consumed++;
-    }
-    result[key] = nested;
-    i += consumed;
-  }
-  return result;
-}
-
-/**
- * @typedef {{ command: string, label: string, order: number, icon: string, submit: string, description: string }} PromptButton
- */
-
-/**
- * Resolve the button config from frontmatter. Returns null when the prompt
- * does not opt in. Accepts the `button:` object form, the `button: true`
- * shorthand, and the legacy flat `buttonLabel` / `buttonOrder` / `buttonIcon`
- * fields as a fallback.
- * @param {Record<string, string | Record<string, string>>} fm
- * @param {string} command
- * @returns {PromptButton | null}
- */
-function buttonFromFrontmatter(fm, command) {
-  const raw = fm.button;
-  /** @type {Record<string, string>} */
-  let cfg;
-  if (raw && typeof raw === 'object') {
-    cfg = raw;
-  } else if (String(raw).toLowerCase() === 'true') {
-    cfg = {};
-  } else {
-    return null;
-  }
-  const name = typeof fm.name === 'string' ? fm.name : '';
-  const description = typeof fm.description === 'string' ? fm.description : '';
-  const order = Number.parseFloat(cfg.order || /** @type {string} */ (fm.buttonOrder));
-  const submit = String(cfg.submit || 'send').toLowerCase() === 'type' ? 'type' : 'send';
+function defaultConfig() {
   return {
-    command,
-    label: cfg.label || /** @type {string} */ (fm.buttonLabel) || name || command,
-    order: Number.isFinite(order) ? order : 999,
-    icon: (cfg.icon || /** @type {string} */ (fm.buttonIcon) || '').replace(/[^a-z0-9-]/gi, ''),
-    submit,
-    description
+    commands: [
+      { command: 'simplify', label: 'Simplify', icon: 'sparkle', submit: 'send', description: '审查变更代码的复用性、质量与效率，并修复发现的问题。' },
+      { command: 'bump', label: 'Bump Version', icon: 'versions', submit: 'send', description: '探测当前仓库的版本管理方式并升级版本号（可选 major / minor / patch）。' },
+      { command: 'commit', label: 'Commit', icon: 'git-commit', submit: 'send', description: '依据本地实际 diff 生成符合 Conventional Commits 规范的提交。' },
+      { command: 'addtag', label: 'Add Tag', icon: 'tag', submit: 'send', description: '为当前版本号在本地创建对应的 git tag。' }
+    ]
   };
 }
 
 /**
- * Scan all folders and return the buttons that opted in via frontmatter.
- * @returns {PromptButton[]}
+ * Ensure the config file exists, seeding it with defaults on first run.
+ * @param {vscode.ExtensionContext} context
+ * @returns {string} the config path
  */
-function collectButtons() {
-  /** @type {Map<string, PromptButton>} */
-  const byCommand = new Map();
-  for (const folder of resolveFolders()) {
-    let entries;
-    try {
-      entries = fs.readdirSync(folder);
-    } catch {
-      continue;
-    }
-    for (const file of entries) {
-      if (!file.toLowerCase().endsWith('.prompt.md')) continue;
-      const full = path.join(folder, file);
-      let content;
-      try {
-        content = fs.readFileSync(full, 'utf8');
-      } catch {
-        continue;
-      }
-      const command = file.slice(0, -'.prompt.md'.length);
-      if (byCommand.has(command)) continue; // earlier folder wins
-      const button = buttonFromFrontmatter(parseFrontmatter(content), command);
-      if (button) byCommand.set(command, button);
-    }
-  }
-  return [...byCommand.values()].sort(
-    (a, b) => a.order - b.order || a.label.localeCompare(b.label)
-  );
+function ensureConfig(context) {
+  const p = configPath(context);
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    // Write only if absent (atomic 'wx'); EEXIST is the expected no-op case.
+    fs.writeFileSync(p, JSON.stringify(defaultConfig(), null, 2) + '\n', { flag: 'wx' });
+  } catch { /* already exists or unwritable */ }
+  return p;
 }
+
+/**
+ * Read the command buttons from the JSON config. Accepts either a top-level
+ * array or an object with a `commands` array. Invalid entries are skipped.
+ * @param {vscode.ExtensionContext} context
+ * @returns {CommandButton[]}
+ */
+function loadButtons(context) {
+  let raw;
+  try {
+    raw = fs.readFileSync(configPath(context), 'utf8');
+  } catch {
+    return [];
+  }
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  const list = Array.isArray(data) ? data : Array.isArray(data && data.commands) ? data.commands : [];
+  /** @type {Map<string, CommandButton>} */
+  const byCommand = new Map();
+  for (const c of list) {
+    if (!c || typeof c.command !== 'string' || !c.command.trim()) continue;
+    const command = c.command.trim();
+    if (byCommand.has(command)) continue;
+    byCommand.set(command, {
+      command,
+      label: typeof c.label === 'string' && c.label ? c.label : command,
+      icon: typeof c.icon === 'string' ? c.icon.replace(/[^a-z0-9-]/gi, '') : '',
+      submit: String(c.submit || 'send').toLowerCase() === 'type' ? 'type' : 'send',
+      description: typeof c.description === 'string' ? c.description : ''
+    });
+  }
+  return [...byCommand.values()];
+}
+
 
 class PanelViewProvider {
   /** @param {vscode.ExtensionContext} context */
@@ -191,6 +106,12 @@ class PanelViewProvider {
         vscode.commands.executeCommand('ohMyCopilot.enableInjection');
       } else if (msg.type === 'restoreDefault') {
         vscode.commands.executeCommand('ohMyCopilot.restoreDefault');
+      } else if (msg.type === 'editConfig') {
+        vscode.commands.executeCommand('ohMyCopilot.editConfig');
+      } else if (msg.type === 'reloadWindow') {
+        vscode.commands.executeCommand('workbench.action.reloadWindow');
+      } else if (msg.type === 'toggleDevTools') {
+        vscode.commands.executeCommand('workbench.action.toggleDevTools');
       }
     });
     this.refresh();
@@ -256,12 +177,26 @@ function render() {
 </style>
 </head>
 <body>
+  <div class="ctl util">
+    <button id="reload" title="重载窗口（Developer: Reload Window）">重载窗口</button>
+    <button id="devtools" title="切换开发人员工具（Toggle Developer Tools）">开发工具</button>
+  </div>
   <div class="ctl">
-    <button id="enable" title="重新扫描 prompts 并刷新 Chat 输入框上方的命令按钮">刷新命令</button>
-    <button id="restore" title="清空注入并恢复默认 Chat 界面">清空命令</button>
+    <button id="edit" title="在 VS Code 中打开命令配置 JSON">编辑配置</button>
+    <button id="enable" title="读取配置并刷新 Chat 输入框上方的命令按钮">应用配置</button>
+    <button id="restore" title="清空注入并恢复默认 Chat 界面">恢复默认</button>
   </div>
   <script>
     const vscode = acquireVsCodeApi();
+    document.getElementById('reload').addEventListener('click', () => {
+      vscode.postMessage({ type: 'reloadWindow' });
+    });
+    document.getElementById('devtools').addEventListener('click', () => {
+      vscode.postMessage({ type: 'toggleDevTools' });
+    });
+    document.getElementById('edit').addEventListener('click', () => {
+      vscode.postMessage({ type: 'editConfig' });
+    });
     document.getElementById('enable').addEventListener('click', () => {
       vscode.postMessage({ type: 'enableInjection' });
     });
@@ -276,52 +211,187 @@ function render() {
 /**
  * Build the workbench injection script that renders a button row above the
  * Chat input and submits the matching slash command on click.
- * @param {PromptButton[]} buttons
+ * @param {CommandButton[]} buttons
  * @returns {string}
  */
 function buildInjectionScript(buttons) {
-  const data = JSON.stringify(
-    buttons.map((b) => ({ command: b.command, label: b.label, icon: b.icon, submit: b.submit, description: b.description }))
-  );
-  return `// AUTO-GENERATED by Oh My Copilot. Do not edit; use the \"刷新命令\" button instead.
+  const data = JSON.stringify(buttons);
+  return `// AUTO-GENERATED by Oh My Copilot. Do not edit; use the \"应用配置\" button instead.
 (function () {
   'use strict';
   var BUTTONS = ${data};
   var ROW_CLASS = 'omc-button-row';
 
-  function buildRow() {
+  // Minimal overrides that can't come from reused classes: a pointer cursor and
+  // the hover background (reuses a VS Code variable — no hard-coded numbers).
+  // We also relax two constraints the plural container imposes so our separate
+  // row isn't width-limited or clipped.
+  function ensureStyle() {
+    if (document.getElementById('omc-style')) return;
+    var st = document.createElement('style');
+    st.id = 'omc-style';
+    st.textContent =
+      '.omc-button-row{max-width:none}' +
+      '.omc-button-row>.chat-input-toolbar{width:auto;min-width:0;overflow:visible}' +
+      '.omc-button-row .action-label{cursor:pointer}' +
+      '.omc-button-row .action-label:hover{background-color:var(--vscode-toolbar-hoverBackground)}' +
+      // Our hover isn't sized by VS Code's hover service, so the absolute
+      // .monaco-hover would shrink-to-min (a tall narrow column). max-content
+      // makes it hug the text and wrap at the reused .hover-contents max-width.
+      '.omc-hover .monaco-hover{width:max-content}';
+    (document.head || document.documentElement).appendChild(st);
+  }
+
+  // ---- Custom hover, matching VS Code's native pill tooltip --------------
+  // VS Code's native hover is its own .monaco-hover widget anchored to the
+  // element (NOT the browser title attribute, which floats at the cursor). We
+  // replicate it by REUSING the native classes and mounting into the same
+  // .monaco-editor overflow container so the themed rules apply.
+  var hoverEl = null;
+  var hoverTimer = null;
+
+  // Mount into the chat editor's overflow widgets so the themed editor-hover
+  // rules (.monaco-editor .monaco-hover → bg/border/radius/color/shadow) apply.
+  // The width fix is the .markdown-hover > .hover-contents wrapper, which reuses
+  // .monaco-hover .markdown-hover>.hover-contents (max-width 500px + word-wrap)
+  // and .hover-contents (padding 4px 8px).
+  function hoverContainer() {
+    return (
+      document.querySelector('.chat-editor-overflow.monaco-editor .overflowingContentWidgets') ||
+      document.querySelector('.monaco-editor .overflowingContentWidgets') ||
+      document.body
+    );
+  }
+
+  function buildHover(text) {
+    var wrap = document.createElement('div');
+    wrap.className = 'monaco-resizable-hover omc-hover';
+    var hover = document.createElement('div');
+    hover.className = 'monaco-hover';
+    hover.setAttribute('role', 'tooltip');
+    var content = document.createElement('div');
+    content.className = 'monaco-hover-content';
     var row = document.createElement('div');
-    row.className = ROW_CLASS;
-    row.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:0 8px 4px 6px;';
+    row.className = 'hover-row';
+    var md = document.createElement('div');
+    md.className = 'markdown-hover';
+    var contents = document.createElement('div');
+    contents.className = 'hover-contents';
+    contents.textContent = text;
+    md.appendChild(contents);
+    row.appendChild(md);
+    content.appendChild(row);
+    hover.appendChild(content);
+    wrap.appendChild(hover);
+    return wrap;
+  }
+
+  function hideHover() {
+    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
+    if (hoverEl && hoverEl.parentNode) hoverEl.parentNode.removeChild(hoverEl);
+    hoverEl = null;
+  }
+
+  function showHover(anchor, text) {
+    hideHover();
+    var container = hoverContainer();
+    var useFixed = container === document.body;
+    hoverEl = buildHover(text);
+    hoverEl.style.position = useFixed ? 'fixed' : 'absolute';
+    hoverEl.style.zIndex = '50';
+    hoverEl.style.visibility = 'hidden';
+    container.appendChild(hoverEl);
+    // Anchor below the button, left edges aligned (clamped to the viewport).
+    var a = anchor.getBoundingClientRect();
+    var top, left;
+    if (useFixed) {
+      top = a.bottom + 2;
+      left = a.left;
+    } else {
+      var c = container.getBoundingClientRect();
+      top = a.bottom - c.top + 2;
+      left = a.left - c.left;
+    }
+    hoverEl.style.top = Math.round(top) + 'px';
+    hoverEl.style.left = Math.round(Math.max(0, left)) + 'px';
+    hoverEl.style.visibility = '';
+  }
+
+  function attachHover(anchor, text) {
+    anchor.addEventListener('mouseenter', function () {
+      hoverTimer = setTimeout(function () { showHover(anchor, text); }, 300);
+    });
+    anchor.addEventListener('mouseleave', hideHover);
+  }
+
+  // Build the row by REPLICATING the native pill structure and class names, so
+  // the workbench's own stylesheet rules style it (font, padding, icon size,
+  // color, separators, gap, spacing …). Nothing is hard-coded; if VS Code
+  // changes those numbers in a future version our buttons follow automatically.
+  // The OUTER .chat-input-toolbars wrapper is required so the rules scoped to
+  // that plural container (icon 12px, icon color, actions gap, row margin) match.
+  //   .chat-input-toolbars > .chat-input-toolbar > .monaco-action-bar
+  //     > ul.actions-container > li.action-item.chat-input-picker-item
+  //       > a.action-label > span.codicon.codicon-<x> + span.chat-input-picker-label
+  function buildRow() {
+    var root = document.createElement('div');
+    root.className = ROW_CLASS + ' chat-input-toolbars';
+    var tb = document.createElement('div');
+    tb.className = 'chat-input-toolbar';
+    var bar = document.createElement('div');
+    bar.className = 'monaco-action-bar';
+    var ul = document.createElement('ul');
+    ul.className = 'actions-container';
+    ul.setAttribute('role', 'toolbar');
     BUTTONS.forEach(function (b) {
-      var btn = document.createElement('button');
-      btn.type = 'button';
-      btn.title = b.description || '/' + b.command;
-      btn.style.cssText = [
-        'box-sizing:content-box',
-        'display:flex','align-items:center','gap:4px',
-        'height:16px','padding:3px 8px','border:none','border-radius:4px',
-        'cursor:pointer','font-family:var(--vscode-font-family)','font-size:12px',
-        'line-height:normal','color:var(--vscode-icon-foreground)','background:transparent'
-      ].join(';');
+      var li = document.createElement('li');
+      li.className = 'action-item chat-input-picker-item';
+      li.setAttribute('role', 'presentation');
+      var a = document.createElement('a');
+      a.className = 'action-label';
+      a.setAttribute('role', 'button');
+      a.setAttribute('tabindex', '0');
+      var tip = b.description || '/' + b.command;
+      a.setAttribute('aria-label', tip);
       if (b.icon) {
         var ic = document.createElement('span');
         ic.className = 'codicon codicon-' + b.icon;
-        btn.appendChild(ic);
+        a.appendChild(ic);
       }
       var lbl = document.createElement('span');
+      lbl.className = 'chat-input-picker-label';
       lbl.textContent = b.label;
-      btn.appendChild(lbl);
-      btn.addEventListener('mouseenter', function () {
-        btn.style.background = 'var(--vscode-toolbar-hoverBackground)';
-      });
-      btn.addEventListener('mouseleave', function () {
-        btn.style.background = 'transparent';
-      });
-      btn.addEventListener('click', function () { submit(b.command, btn, b.submit); });
-      row.appendChild(btn);
+      a.appendChild(lbl);
+      attachHover(a, tip);
+      a.addEventListener('click', function () { hideHover(); submit(b.command, a, b.submit); });
+      li.appendChild(a);
+      ul.appendChild(li);
     });
-    return row;
+    bar.appendChild(ul);
+    tb.appendChild(bar);
+    root.appendChild(tb);
+    return root;
+  }
+
+  // Shift the whole row so our first item's left edge lines up with the
+  // toolbar's first native pill. Idempotent: resets the offset before
+  // measuring so repeated calls don't accumulate drift.
+  function alignLeft(row, toolbar) {
+    try {
+      var pill =
+        toolbar.querySelector('.monaco-action-bar .actions-container > .action-item .action-label') ||
+        toolbar.querySelector('.action-label');
+      var mine = row.querySelector('.action-label');
+      if (!pill || !mine) return false;
+      row.style.marginLeft = '0px';
+      var pl = pill.getBoundingClientRect().left;
+      var bl = mine.getBoundingClientRect().left;
+      if (!pl || !bl) return false;
+      row.style.marginLeft = (pl - bl) + 'px';
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   // Find the chat session that owns the clicked button row.
@@ -376,7 +446,6 @@ function buildInjectionScript(buttons) {
   function trySend(session, editor, command) {
     var content = editorText(editor);
     if (content.indexOf('/' + command) === -1) return false;
-    // Press Enter to submit.
     pressEnter(editor);
     // If text is still there shortly after, fall back to clicking the send button.
     setTimeout(function () {
@@ -433,11 +502,12 @@ function buildInjectionScript(buttons) {
 
   function ensureRow() {
     var sessions = document.querySelectorAll('.interactive-session');
+    var allDone = sessions.length > 0;
     for (var i = 0; i < sessions.length; i++) {
       var session = sessions[i];
       // The pill row holding Agent / model / High / 1M.
       var toolbar = session.querySelector('.chat-input-toolbars');
-      if (!toolbar || !toolbar.parentNode) continue;
+      if (!toolbar || !toolbar.parentNode) { allDone = false; continue; }
       var host = toolbar.parentNode;
       var existing = host.querySelector(':scope > .' + ROW_CLASS);
       if (existing) {
@@ -445,10 +515,19 @@ function buildInjectionScript(buttons) {
         if (existing.previousSibling !== toolbar) {
           host.insertBefore(existing, toolbar.nextSibling);
         }
+        // Pills may mount after our row; align once positions are known.
+        if (existing.dataset.omcAligned !== '1' && alignLeft(existing, toolbar)) {
+          existing.dataset.omcAligned = '1';
+        }
+        if (existing.dataset.omcAligned !== '1') allDone = false;
         continue;
       }
-      host.insertBefore(buildRow(), toolbar.nextSibling);
+      var row = buildRow();
+      host.insertBefore(row, toolbar.nextSibling);
+      if (alignLeft(row, toolbar)) row.dataset.omcAligned = '1';
+      else allDone = false;
     }
+    return allDone;
   }
 
   var scheduled = false;
@@ -463,14 +542,17 @@ function buildInjectionScript(buttons) {
 
   function start() {
     if (!document.body) { setTimeout(start, 50); return; }
+    try { ensureStyle(); } catch (e) {}
     try {
       new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
     } catch (e) {}
-    // Also poll for a while in case the chat view mounts late or the observer misses it.
+    // Also poll for a while in case the chat view mounts late or the observer
+    // misses it; stop early once every session has an installed, aligned row.
     var ticks = 0;
     var iv = setInterval(function () {
-      try { ensureRow(); } catch (e) {}
-      if (++ticks > 120) clearInterval(iv); // ~60s safety net
+      var done = false;
+      try { done = ensureRow(); } catch (e) {}
+      if (done || ++ticks > 120) clearInterval(iv); // ~60s safety net
     }, 500);
     try { ensureRow(); } catch (e) {}
   }
@@ -484,14 +566,26 @@ function buildInjectionScript(buttons) {
 `;
 }
 
+/** Filename of the workbench injection script (also the marker in imports). */
+const INJECT_FILE = 'omc-inject.js';
+
+/**
+ * Absolute path to the workbench injection script under the extension's media.
+ * @param {vscode.ExtensionContext} context
+ * @returns {string}
+ */
+function injectionFilePath(context) {
+  return path.join(context.extensionPath, 'media', INJECT_FILE);
+}
+
 /**
  * Write the injection script to media/omc-inject.js.
  * @param {vscode.ExtensionContext} context
  * @returns {string} the absolute file path
  */
 function writeInjection(context) {
-  const file = path.join(context.extensionPath, 'media', 'omc-inject.js');
-  fs.writeFileSync(file, buildInjectionScript(collectButtons()), 'utf8');
+  const file = injectionFilePath(context);
+  fs.writeFileSync(file, buildInjectionScript(loadButtons(context)), 'utf8');
   return file;
 }
 
@@ -502,7 +596,7 @@ function writeInjection(context) {
  * @returns {string} the absolute file path
  */
 function clearInjection(context) {
-  const file = path.join(context.extensionPath, 'media', 'omc-inject.js');
+  const file = injectionFilePath(context);
   fs.writeFileSync(
     file,
     '// Oh My Copilot injection disabled (restored to default).\n',
@@ -520,7 +614,7 @@ const CUSTOM_CSS_EXT = 'be5invis.vscode-custom-css';
 function customCssImportsWithoutOurs() {
   const cfg = vscode.workspace.getConfiguration('vscode_custom_css');
   return (cfg.get('imports') || []).filter(
-    (x) => typeof x === 'string' && !x.includes('omc-inject.js')
+    (x) => typeof x === 'string' && !x.includes(INJECT_FILE)
   );
 }
 
@@ -547,7 +641,6 @@ async function applyCustomCss(preferEnable) {
  * @param {vscode.ExtensionContext} context
  */
 async function enableInjection(context) {
-  // 1. Generate the script.
   let file;
   try {
     file = writeInjection(context);
@@ -557,7 +650,6 @@ async function enableInjection(context) {
   }
   const url = vscode.Uri.file(file).toString(true);
 
-  // 2. Ensure the Custom CSS and JS Loader extension is installed.
   if (!vscode.extensions.getExtension(CUSTOM_CSS_EXT)) {
     const pick = await vscode.window.showWarningMessage(
       '一键启用需要扩展「Custom CSS and JS Loader」。请先安装，安装后再次点击「一键启用注入」。',
@@ -572,8 +664,10 @@ async function enableInjection(context) {
     return;
   }
 
-  // 3. Register our file:// URL (replacing any stale omc-inject entry).
+  // Replace any stale entry. If ours was already present this is a refresh, so
+  // we can use the lighter "update" command instead of the first-time install.
   const imports = customCssImportsWithoutOurs();
+  const wasRegistered = imports.length !== (vscode.workspace.getConfiguration('vscode_custom_css').get('imports') || []).length;
   imports.push(url);
   try {
     await vscode.workspace
@@ -584,8 +678,8 @@ async function enableInjection(context) {
     return;
   }
 
-  // 4. Patch workbench (Custom CSS shows its own reload prompt; don't add another).
-  const applied = await applyCustomCss(true);
+  // Custom CSS shows its own reload prompt; don't add another.
+  const applied = await applyCustomCss(!wasRegistered);
   if (!applied) {
     const pick = await vscode.window.showWarningMessage(
       'Oh My Copilot: 已写入配置，但未找到 Custom CSS 的启用命令。请手动运行「Enable Custom CSS and JS」，然后重载窗口。',
@@ -597,6 +691,20 @@ async function enableInjection(context) {
   }
 }
 
+/**
+ * Open the JSON command config in an editor, seeding defaults if missing.
+ * @param {vscode.ExtensionContext} context
+ */
+async function editConfig(context) {
+  const p = ensureConfig(context);
+  try {
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(p));
+    await vscode.window.showTextDocument(doc);
+  } catch (e) {
+    vscode.window.showErrorMessage('Oh My Copilot: 打开配置失败 — ' + String(e));
+  }
+}
+
 /** @param {vscode.ExtensionContext} context */
 function activate(context) {
   const provider = new PanelViewProvider(context);
@@ -604,7 +712,8 @@ function activate(context) {
     vscode.window.registerWebviewViewProvider('ohMyCopilot.panel', provider)
   );
 
-  // Keep the workbench injection script up to date.
+  // Seed the JSON config on first run, then keep the injection script current.
+  ensureConfig(context);
   try { writeInjection(context); } catch { /* ignore */ }
 
   context.subscriptions.push(
@@ -642,31 +751,25 @@ function activate(context) {
     vscode.commands.registerCommand('ohMyCopilot.enableInjection', () => enableInjection(context))
   );
 
-  // Regenerate the injection script when any prompt file changes.
-  for (const folder of resolveFolders()) {
-    try {
-      const watcher = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(vscode.Uri.file(folder), '*.prompt.md')
-      );
-      const onChange = () => {
-        try { writeInjection(context); } catch { /* ignore */ }
-      };
-      watcher.onDidCreate(onChange);
-      watcher.onDidChange(onChange);
-      watcher.onDidDelete(onChange);
-      context.subscriptions.push(watcher);
-    } catch {
-      // ignore folders that cannot be watched
-    }
-  }
-
   context.subscriptions.push(
-    vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('ohMyCopilot.promptFolders')) {
-        try { writeInjection(context); } catch { /* ignore */ }
-      }
-    })
+    vscode.commands.registerCommand('ohMyCopilot.editConfig', () => editConfig(context))
   );
+
+  // Regenerate the injection script when the JSON config changes.
+  try {
+    const watcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(vscode.Uri.file(path.dirname(configPath(context))), 'commands.json')
+    );
+    const onChange = () => {
+      try { writeInjection(context); } catch { /* ignore */ }
+    };
+    watcher.onDidCreate(onChange);
+    watcher.onDidChange(onChange);
+    watcher.onDidDelete(onChange);
+    context.subscriptions.push(watcher);
+  } catch {
+    // ignore if the config folder cannot be watched
+  }
 }
 
 function deactivate() {}

@@ -1,11 +1,6 @@
 ---
 name: addtag
 description: 'Detect the current repository''s version, then create a matching local git tag. If a tag for that version already exists, ask the user how to proceed.'
-button:
-  label: Add Tag
-  icon: tag
-  order: 4
-  submit: send
 ---
 
 # Add Tag: Create a Local Git Tag for the Current Version

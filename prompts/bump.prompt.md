@@ -1,11 +1,6 @@
 ---
 name: bump
 description: 'Detect the current repository''s versioning scheme and bump the version, letting you pick which part (major / minor / patch / etc.) via a question.'
-button:
-  label: Bump Version
-  icon: versions
-  order: 2
-  submit: send
 ---
 
 # Bump Version: Increment This Repository's Version
