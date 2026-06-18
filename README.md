@@ -98,24 +98,31 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Extension
 
 #### 命令配置（`commands.json`）
 
-命令列表由一个独立的 JSON 配置文件定义（不再扫描 prompt.md frontmatter）。
-文件存于扩展的 globalStorage：
+按钮列表由一个独立的 JSON 配置文件定义（不再扫描 prompt.md frontmatter）。
+每个按钮是一个**宏**：`text` 就是点击时插入 Chat 的文本——以 `/` 开头即为 slash
+命令（如 `/commit`），否则就是一段直接发给 Copilot 的 prompt。文件存于扩展的 globalStorage：
 
 - Windows `%APPDATA%\Code\User\globalStorage\local.oh-my-copilot-panel\commands.json`
 
 首次运行会自动写入默认配置。点面板「编辑配置」可直接在 VS Code 中打开它，改完点「应用配置」生效。
 
-格式为 `{ "commands": [...] }`（也兼容顶层数组），按钮顺序即列表顺序，每项字段：
+格式为 `{ "commands": [...] }`（也兼容顶层数组），按钮顺序即列表顺序：
 
 ```jsonc
 {
   "commands": [
     {
-      "command": "commit",      // 对应的 slash 命令名（即 commit.prompt.md 的文件名）
-      "label": "Commit",        // 按钮文字，默认取 command
-      "icon": "git-commit",     // codicon 名（见 https://microsoft.github.io/vscode-codicons），默认无图标
-      "submit": "send",          // send（默认）= 填充并自动发送；type = 仅填充输入框待用户补充参数
-      "description": "..."       // 鼠标悬停 tooltip 文案
+      "text": "/commit",     // 以 / 开头 → 执行 slash 命令 /commit（对应 commit.prompt.md）
+      "label": "Commit",
+      "icon": "git-commit",   // codicon 名（见 https://microsoft.github.io/vscode-codicons），默认无图标
+      "submit": "send",        // send（默认）= 填充并自动发送；type = 仅填充输入框待用户补充
+      "description": "..."     // 鼠标悬停 tooltip 文案
+    },
+    {
+      "text": "解释最近改动的代码并指出潜在问题。",  // 不以 / 开头 → 作为 prompt 文本直接发送
+      "label": "解释改动",
+      "icon": "comment-discussion",
+      "submit": "send"
     }
   ]
 }
@@ -123,14 +130,14 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Extension
 
 | 字段 | 含义 | 默认 |
 |---|---|---|
-| `command` | slash 命令名（必填）；点击即在 Chat 执行 `/<command>` | — |
-| `label` | 按钮显示文字 | `command` |
+| `text` | 点击插入 Chat 的文本；`/xxx` = slash 命令，否则 = prompt（必填） | — |
+| `label` | 按钮显示文字 | `text` 前若干字 |
 | `icon` | codicon 图标名 | 无 |
 | `submit` | `send` 自动发送 / `type` 仅填充待编辑 | `send` |
-| `description` | 悬停 tooltip 文案 | 无 |
+| `description` | 悬停 tooltip 文案 | 取 `text` |
 
 - 按钮顺序 = `commands` 数组中的顺序，调整顺序直接拖动条目即可。
-- `command` 需对应一个真实存在的 prompt（如 `commit.prompt.md`），这样 `/<command>` 才是有效的 slash 命令。
+- `/xxx` 形式需对应一个真实存在的 prompt（如 `commit.prompt.md`），这样 slash 命令才有效。
 - 改完 `commands.json` 后点面板「应用配置」即可把变更应用到 Chat 输入框上方。
 
 ## License

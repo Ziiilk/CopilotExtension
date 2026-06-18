@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * @typedef {{ command: string, label: string, icon: string, submit: string, description: string }} CommandButton
+ * @typedef {{ text: string, label: string, icon: string, submit: string, description: string }} MacroButton
  */
 
 /**
@@ -19,15 +19,15 @@ function configPath(context) {
 
 /**
  * The default config written when none exists yet.
- * @returns {{ commands: CommandButton[] }}
+ * @returns {{ commands: object[] }}
  */
 function defaultConfig() {
   return {
     commands: [
-      { command: 'simplify', label: 'Simplify', icon: 'sparkle', submit: 'send', description: '审查变更代码的复用性、质量与效率，并修复发现的问题。' },
-      { command: 'bump', label: 'Bump Version', icon: 'versions', submit: 'send', description: '探测当前仓库的版本管理方式并升级版本号（可选 major / minor / patch）。' },
-      { command: 'commit', label: 'Commit', icon: 'git-commit', submit: 'send', description: '依据本地实际 diff 生成符合 Conventional Commits 规范的提交。' },
-      { command: 'addtag', label: 'Add Tag', icon: 'tag', submit: 'send', description: '为当前版本号在本地创建对应的 git tag。' }
+      { text: '/simplify', label: 'Simplify', icon: 'sparkle', submit: 'send', description: '审查变更代码的复用性、质量与效率，并修复发现的问题。' },
+      { text: '/bump', label: 'Bump Version', icon: 'versions', submit: 'send', description: '探测当前仓库的版本管理方式并升级版本号（可选 major / minor / patch）。' },
+      { text: '/commit', label: 'Commit', icon: 'git-commit', submit: 'send', description: '依据本地实际 diff 生成符合 Conventional Commits 规范的提交。' },
+      { text: '/addtag', label: 'Add Tag', icon: 'tag', submit: 'send', description: '为当前版本号在本地创建对应的 git tag。' }
     ]
   };
 }
@@ -67,21 +67,22 @@ function loadButtons(context) {
     return [];
   }
   const list = Array.isArray(data) ? data : Array.isArray(data && data.commands) ? data.commands : [];
-  /** @type {Map<string, CommandButton>} */
-  const byCommand = new Map();
+  /** @type {Map<string, MacroButton>} */
+  const byKey = new Map();
   for (const c of list) {
-    if (!c || typeof c.command !== 'string' || !c.command.trim()) continue;
-    const command = c.command.trim();
-    if (byCommand.has(command)) continue;
-    byCommand.set(command, {
-      command,
-      label: typeof c.label === 'string' && c.label ? c.label : command,
+    if (!c) continue;
+    // A macro is just the text to insert; a slash command is text starting '/'.
+    const text = typeof c.text === 'string' ? c.text : '';
+    if (!text.trim() || byKey.has(text)) continue;
+    byKey.set(text, {
+      text,
+      label: typeof c.label === 'string' && c.label ? c.label : text.trim().slice(0, 24),
       icon: typeof c.icon === 'string' ? c.icon.replace(/[^a-z0-9-]/gi, '') : '',
       submit: String(c.submit || 'send').toLowerCase() === 'type' ? 'type' : 'send',
       description: typeof c.description === 'string' ? c.description : ''
     });
   }
-  return [...byCommand.values()];
+  return [...byKey.values()];
 }
 
 
@@ -211,7 +212,7 @@ function render() {
 /**
  * Build the workbench injection script that renders a button row above the
  * Chat input and submits the matching slash command on click.
- * @param {CommandButton[]} buttons
+ * @param {MacroButton[]} buttons
  * @returns {string}
  */
 function buildInjectionScript(buttons) {
@@ -351,7 +352,7 @@ function buildInjectionScript(buttons) {
       a.className = 'action-label';
       a.setAttribute('role', 'button');
       a.setAttribute('tabindex', '0');
-      var tip = b.description || '/' + b.command;
+      var tip = b.description || b.text.trim();
       a.setAttribute('aria-label', tip);
       if (b.icon) {
         var ic = document.createElement('span');
@@ -363,7 +364,7 @@ function buildInjectionScript(buttons) {
       lbl.textContent = b.label;
       a.appendChild(lbl);
       attachHover(a, tip);
-      a.addEventListener('click', function () { hideHover(); submit(b.command, a, b.submit); });
+      a.addEventListener('click', function () { hideHover(); submit(b.text, a, b.submit); });
       li.appendChild(a);
       ul.appendChild(li);
     });
@@ -443,13 +444,13 @@ function buildInjectionScript(buttons) {
     return vl ? vl.textContent || '' : '';
   }
 
-  function trySend(session, editor, command) {
+  function trySend(session, editor, needle) {
     var content = editorText(editor);
-    if (content.indexOf('/' + command) === -1) return false;
+    if (content.indexOf(needle) === -1) return false;
     pressEnter(editor);
     // If text is still there shortly after, fall back to clicking the send button.
     setTimeout(function () {
-      if (editorText(editor).indexOf('/' + command) !== -1) {
+      if (editorText(editor).indexOf(needle) !== -1) {
         clickSendButton(session);
       }
     }, 70);
@@ -463,13 +464,15 @@ function buildInjectionScript(buttons) {
     return target;
   }
 
-  function submit(command, originNode, mode) {
+  function submit(text, originNode, mode) {
     var session = findSession(originNode);
     if (!session) { console.warn('[omc] no session'); return; }
     var editor = session.querySelector('.chat-editor-container .monaco-editor');
     if (!editor) { console.warn('[omc] no monaco editor'); return; }
 
-    var text = '/' + command + ' ';
+    // The needle verifies the paste landed; trailing whitespace is normalized
+    // away so it matches regardless of how the editor trims the macro text.
+    var needle = text.replace(/\s+$/, '');
 
     // Monaco rejects synthetic insertText/beforeinput, but honors a paste event
     // carrying a DataTransfer. Clipboard API write is blocked in the workbench
@@ -492,10 +495,10 @@ function buildInjectionScript(buttons) {
     // mode "type": only fill the input so the user can add arguments, then stop.
     if (mode === 'type') return;
     setTimeout(function () {
-      if (!trySend(session, editor, command)) {
+      if (!trySend(session, editor, needle)) {
         // One retry in case the editor mounted/focused late.
         pasteIntoEditor();
-        setTimeout(function () { trySend(session, editor, command); }, 90);
+        setTimeout(function () { trySend(session, editor, needle); }, 90);
       }
     }, 80);
   }
