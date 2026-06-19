@@ -351,10 +351,10 @@ function buildInjectionScript(buttons, memos, bridge) {
     memoRoot = null;
   }
 
-  function memoPost(payload) {
+  function bridgePost(payload) {
     if (!BRIDGE_PORT) return;
     try {
-      fetch('http://127.0.0.1:' + BRIDGE_PORT + '/?token=' + encodeURIComponent(BRIDGE_TOKEN) + '&cmd=memo', {
+      fetch('http://127.0.0.1:' + BRIDGE_PORT + '/?token=' + encodeURIComponent(BRIDGE_TOKEN), {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain' },
         body: JSON.stringify(payload)
@@ -545,12 +545,12 @@ function buildInjectionScript(buttons, memos, bridge) {
       return out;
     }
 
-    function persist() { memoPost({ op: 'set', memos: memoState.memos }); }
+    function persist() { bridgePost({ op: 'set', memos: memoState.memos }); }
 
     function act(a, i) {
       var m = memoState.memos[i];
       if (a === 'insert') { if (m) { hideMemo(); submit(m.text, anchor, 'type'); } }
-      else if (a === 'copy') { if (m) memoPost({ op: 'copy', text: m.text }); }
+      else if (a === 'copy') { if (m) bridgePost({ op: 'copy', text: m.text }); }
       else if (a === 'delete') { memoState.memos.splice(i, 1); persist(); render(); }
       else if (a === 'edit') openForm(i);
     }
@@ -804,6 +804,80 @@ function buildInjectionScript(buttons, memos, bridge) {
     }, 80);
   }
 
+  // Chat-focus toggle. The button uses its OWN .monaco-action-bar so it gets
+  // native styling but is isolated from the real layout toolbar's click
+  // delegation and re-rendering. cpxFocusState is null when off; when on it
+  // records which parts we hid (read from the workbench's nosidebar/nopanel/
+  // noauxiliarybar classes) so toggling is idempotent. Commands run via the bridge.
+  var cpxFocusState = null;
+  var cpxFocusLabel = null;
+
+  function wbHas(cls) {
+    var e = document.querySelector('.monaco-workbench');
+    return !!(e && e.classList.contains(cls));
+  }
+
+  function setFocusIcon() {
+    if (!cpxFocusLabel) return;
+    // One icon; the pressed state is the native checked highlight. Guard the
+    // write so the per-tick re-sync from the schedule/poll loop is a no-op.
+    var cls = 'action-label codicon codicon-layout-centered' + (cpxFocusState ? ' checked' : '');
+    if (cpxFocusLabel.className !== cls) cpxFocusLabel.className = cls;
+  }
+
+  function toggleChatFocus() {
+    var cmds = [];
+    if (!cpxFocusState) {
+      var s = { panel: !wbHas('nopanel'), aux: !wbHas('noauxiliarybar') };
+      cmds.push('workbench.action.chat.openInEditor');
+      if (s.panel) cmds.push('workbench.action.togglePanel');
+      if (s.aux) cmds.push('workbench.action.toggleAuxiliaryBar');
+      cpxFocusState = s;
+    } else {
+      if (cpxFocusState.aux && wbHas('noauxiliarybar')) cmds.push('workbench.action.toggleAuxiliaryBar');
+      if (cpxFocusState.panel && wbHas('nopanel')) cmds.push('workbench.action.togglePanel');
+      cmds.push('workbench.action.chat.openInSidebar');
+      cpxFocusState = null;
+    }
+    setFocusIcon();
+    bridgePost({ op: 'runCommands', commands: cmds });
+  }
+
+  function ensureEditorToggle() {
+    if (document.querySelector('.cpx-focus-item')) {
+      var ex = document.querySelector('.cpx-focus-item .action-label');
+      if (ex) { cpxFocusLabel = ex; setFocusIcon(); }
+      return true;
+    }
+    // Anchor on the primary-sidebar toggle (aria-label text or its codicon).
+    var anchor = null;
+    var items = document.querySelectorAll('.titlebar-right .action-label, .action-toolbar-container .action-label');
+    for (var i = 0; i < items.length; i++) {
+      var al = items[i].getAttribute('aria-label') || '';
+      if (al.indexOf('主侧栏') !== -1 || al.indexOf('Primary Side Bar') !== -1 || /\bcodicon-panel-left\b/.test(items[i].className)) { anchor = items[i]; break; }
+    }
+    if (!anchor) return false;
+    var li = anchor.closest ? anchor.closest('.action-item') : null;
+    if (!li || !li.parentNode) return false;
+    // Build our own action item right after the sidebar toggle. It is not
+    // registered with the native ActionBar, so the ActionBar attaches no click
+    // handler to it and it cannot misfire a native action. The toolbar may
+    // re-render and drop it; the schedule/poll loop re-inserts it and restores
+    // the checked state from cpxFocusState.
+    var newLi = mkEl('li', ''); newLi.className = 'action-item cpx-focus-item';
+    newLi.setAttribute('role', 'presentation');
+    var a = mkEl('a', '');
+    a.setAttribute('role', 'button'); a.setAttribute('tabindex', '0');
+    a.setAttribute('aria-label', '聊天专注（铺满/还原）'); a.title = '聊天专注（铺满/还原）';
+    a.addEventListener('mousedown', function (e) { e.preventDefault(); e.stopPropagation(); });
+    a.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); toggleChatFocus(); });
+    newLi.appendChild(a);
+    cpxFocusLabel = a;
+    setFocusIcon();
+    li.parentNode.insertBefore(newLi, li.nextSibling);
+    return true;
+  }
+
   function ensureRow() {
     var sessions = document.querySelectorAll('.interactive-session');
     var allDone = sessions.length > 0;
@@ -841,6 +915,7 @@ function buildInjectionScript(buttons, memos, bridge) {
     (window.requestAnimationFrame || setTimeout)(function () {
       scheduled = false;
       try { ensureRow(); } catch (e) {}
+      try { ensureEditorToggle(); } catch (e) {}
     });
   }
 
@@ -856,9 +931,12 @@ function buildInjectionScript(buttons, memos, bridge) {
     var iv = setInterval(function () {
       var done = false;
       try { done = ensureRow(); } catch (e) {}
-      if (done || ++ticks > 120) clearInterval(iv); // ~60s safety net
+      var tog = false;
+      try { tog = ensureEditorToggle(); } catch (e) {}
+      if ((done && tog) || ++ticks > 120) clearInterval(iv); // ~60s safety net
     }, 500);
     try { ensureRow(); } catch (e) {}
+    try { ensureEditorToggle(); } catch (e) {}
   }
 
   if (document.readyState === 'loading') {
@@ -1071,19 +1149,41 @@ function saveMemos(context, memos) {
 let bridgePort = 0;
 let bridgeToken = '';
 
+const FOCUS_CMD_WHITELIST = new Set([
+  'workbench.action.chat.openInEditor',
+  'workbench.action.chat.openInSidebar',
+  'workbench.action.togglePanel',
+  'workbench.action.toggleAuxiliaryBar'
+]);
+
 /**
- * Apply a memo operation sent by the injected in-DOM manager over the bridge.
- * `op:'set'` replaces the whole list (sanitized); `op:'copy'` copies text to the
+ * Run an ordered list of layout/chat commands requested by the injected
+ * chat-focus toggle, restricted to a fixed whitelist (no arbitrary execution).
+ * @param {any[]} commands
+ */
+async function runFocusCommands(commands) {
+  for (const id of commands) {
+    if (typeof id === 'string' && FOCUS_CMD_WHITELIST.has(id)) {
+      try { await vscode.commands.executeCommand(id); } catch { /* ignore */ }
+    }
+  }
+}
+
+/**
+ * Apply an operation sent by the injected script over the bridge. Memo ops:
+ * `op:'set'` replaces the whole list (sanitized), `op:'copy'` copies text to the
  * clipboard.
  * @param {vscode.ExtensionContext} context
  * @param {{op?: string, memos?: any[], text?: string}} payload
  */
-function handleMemoBridge(context, payload) {
+function handleBridge(context, payload) {
   if (!payload || typeof payload !== 'object') return;
   if (payload.op === 'set' && Array.isArray(payload.memos)) {
     saveMemos(context, sanitizeMemos(payload.memos));
   } else if (payload.op === 'copy' && typeof payload.text === 'string') {
     vscode.env.clipboard.writeText(payload.text).then(undefined, () => { /* ignore */ });
+  } else if (payload.op === 'runCommands' && Array.isArray(payload.commands)) {
+    runFocusCommands(payload.commands);
   }
 }
 
@@ -1114,7 +1214,7 @@ function startBridge(context) {
       let body = '';
       req.on('data', (c) => { body += c; if (body.length > 1e6) req.destroy(); });
       req.on('end', () => {
-        try { handleMemoBridge(context, JSON.parse(body || '{}')); res.writeHead(200); res.end('ok'); }
+        try { handleBridge(context, JSON.parse(body || '{}')); res.writeHead(200); res.end('ok'); }
         catch { res.writeHead(400); res.end(); }
       });
       return;
