@@ -246,7 +246,11 @@ function buildInjectionScript(buttons, memos, bridge) {
       // Our hover isn't sized by VS Code's hover service, so the absolute
       // .monaco-hover would shrink-to-min (a tall narrow column). max-content
       // makes it hug the text and wrap at the reused .hover-contents max-width.
-      '.cpx-hover .monaco-hover{width:max-content}';
+      '.cpx-hover .monaco-hover{width:max-content}' +
+      // The filled-state glyph is a custom inline SVG (not a codicon), so size
+      // it to the 16px title-bar codicons and let it inherit currentColor.
+      '.cpx-focus-on{display:flex;align-items:center;justify-content:center}' +
+      '.cpx-focus-on>svg{width:16px;height:16px;display:block}';
     (document.head || document.documentElement).appendChild(st);
   }
 
@@ -817,12 +821,33 @@ function buildInjectionScript(buttons, memos, bridge) {
     return !!(e && e.classList.contains(cls));
   }
 
+  // Filled-state glyph: the codicon-layout-centered shape but with its centre
+  // column hollow instead of solid (the even-odd fill rule punches the hole).
+  // Inlined because the codicon font has no hollow-centre variant.
+  var CPX_FOCUS_ICON =
+    '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg">' +
+    '<path fill-rule="evenodd" clip-rule="evenodd" d="M3.5 1H12.5C13.879 1 15 2.121 15 3.5V12.5C15 13.879 13.879 15 12.5 15H3.5C2.121 15 1 13.879 1 12.5V3.5C1 2.121 2.121 1 3.5 1ZM2 3.5V12.5C2 13.327 2.673 14 3.5 14H6V2H3.5C2.673 2 2 2.673 2 3.5ZM12.5 14C13.327 14 14 13.327 14 12.5V3.5C14 2.673 13.327 2 12.5 2H10V14H12.5ZM7 2H9V14H7V2Z"/>' +
+    '</svg>';
+
   function setFocusIcon() {
     if (!cpxFocusLabel) return;
-    // One icon; the pressed state is the native checked highlight. Guard the
-    // write so the per-tick re-sync from the schedule/poll loop is a no-op.
-    var cls = 'action-label codicon codicon-layout-centered' + (cpxFocusState ? ' checked' : '');
-    if (cpxFocusLabel.className !== cls) cpxFocusLabel.className = cls;
+    // Two glyphs: the native centred-layout codicon when off, our own
+    // hollow-centre SVG when filled. The pressed state is the native checked
+    // highlight. Guard the write so the per-tick re-sync from the poll loop is
+    // a no-op.
+    if (cpxFocusState) {
+      var on = 'action-label cpx-focus-on checked';
+      if (cpxFocusLabel.className !== on) {
+        cpxFocusLabel.className = on;
+        cpxFocusLabel.innerHTML = CPX_FOCUS_ICON;
+      }
+    } else {
+      var off = 'action-label codicon codicon-layout-centered';
+      if (cpxFocusLabel.className !== off) {
+        cpxFocusLabel.className = off;
+        cpxFocusLabel.innerHTML = '';
+      }
+    }
   }
 
   function toggleChatFocus() {
