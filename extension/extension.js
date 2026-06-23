@@ -556,19 +556,28 @@ function buildInjectionScript(buttons, memos, bridge) {
 
     // Inline add/edit form.
     var form = mkEl('div', 'display:none;padding:12px;border-top:1px solid ' + wb + ';background:var(--vscode-editor-background)');
-    var inCss = 'width:100%;box-sizing:border-box;margin-bottom:8px;padding:5px 7px;font-family:inherit;font-size:13px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border, transparent);border-radius:2px';
+    var inCss = 'width:100%;box-sizing:border-box;margin-bottom:8px;padding:5px 7px;font-family:inherit;font-size:13px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);border:1px solid var(--vscode-input-border, transparent);border-radius:2px;outline:none';
     var flabel = mkEl('input', inCss);
     flabel.placeholder = '名称（可留空，默认取内容前若干字）';
     var ftext = mkEl('textarea', inCss + ';resize:vertical');
     ftext.rows = 5;
     ftext.placeholder = '内容';
-    var fbtns = mkEl('div', 'text-align:right');
+    var fbtns = mkEl('div', 'display:flex;justify-content:flex-end;gap:6px');
     var cancelBtn = memoBtn('取消', false);
     var saveBtn = memoBtn('保存', true);
-    cancelBtn.style.marginLeft = '6px';
-    saveBtn.style.marginLeft = '6px';
-    fbtns.appendChild(cancelBtn);
+    cancelBtn.style.width = 'auto'; cancelBtn.style.flex = '0 0 auto';
+    saveBtn.style.width = 'auto'; saveBtn.style.flex = '0 0 auto';
     fbtns.appendChild(saveBtn);
+    fbtns.appendChild(cancelBtn);
+
+    // Focus/blur highlight for the form inputs — matches the search box above.
+    function focusBorder(el) { el.style.borderColor = 'var(--vscode-focusBorder)'; }
+    function blurBorder(el) { el.style.borderColor = 'var(--vscode-input-border, var(--vscode-contrastBorder, transparent))'; }
+    flabel.addEventListener('focus', function () { focusBorder(flabel); });
+    flabel.addEventListener('blur', function () { blurBorder(flabel); });
+    ftext.addEventListener('focus', function () { focusBorder(ftext); });
+    ftext.addEventListener('blur', function () { blurBorder(ftext); });
+
     form.appendChild(flabel);
     form.appendChild(ftext);
     form.appendChild(fbtns);
