@@ -39,11 +39,20 @@ function defaultConfig(context) {
  */
 function ensureConfig(context) {
   const p = configPath(context);
-  try {
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    // Write only if absent (atomic 'wx'); EEXIST is the expected no-op case.
-    fs.writeFileSync(p, JSON.stringify(defaultConfig(context), null, 2) + '\n', { flag: 'wx' });
-  } catch { /* already exists or unwritable */ }
+  try { fs.mkdirSync(path.dirname(p), { recursive: true }); } catch { /* unwritable */ }
+  // Seed on first run. When the bundled config has a newer _v than the stored
+  // copy, re-seed so extension updates bring new buttons without wiping user
+  // edits on every activation. Version is tracked in globalState (not in the
+  // user-editable JSON) so _v doesn't leak into the config file.
+  const def = defaultConfig(context);
+  const latestV = def._v || 0;
+  // Strip _v before writing — it's internal, not user-facing config.
+  const seed = JSON.stringify(def, (k, v) => k === '_v' ? undefined : v, 2) + '\n';
+  let cur = null;
+  try { cur = fs.readFileSync(p, 'utf8'); } catch { /* missing */ }
+  if (!cur) { fs.writeFileSync(p, seed, 'utf8'); context.globalState.update('configVersion', latestV); return p; }
+  const curV = context.globalState.get('configVersion', 0);
+  if (latestV > curV) { fs.writeFileSync(p, seed, 'utf8'); context.globalState.update('configVersion', latestV); }
   return p;
 }
 
@@ -86,6 +95,7 @@ function loadButtons(context) {
         icon: typeof c.icon === 'string' ? c.icon.replace(/[^a-z0-9-]/gi, '') : '',
         submit: String(c.submit || 'send').toLowerCase() === 'type' ? 'type' : 'send',
         description: typeof c.description === 'string' ? c.description : '',
+        iconOnly: !!c.iconOnly,
         // A nested row breaks the line at its first button (except the first row);
         // a flat entry honors its explicit newRow/break flag.
         newRow: isRow ? (btnIdx === 0 && rowIdx > 0) : !!(c.newRow || c.break)
@@ -237,6 +247,7 @@ function buildInjectionScript(buttons, memos, bridge) {
   var MEMOS = ${memoData};
   var MEMO_TOKEN = ${JSON.stringify(MEMO_TOKEN)};
   var MEMORY_TOKEN = ${JSON.stringify(MEMORY_TOKEN)};
+  var FOCUS_TOKEN = ${JSON.stringify(FOCUS_TOKEN)};
   var BRIDGE_PORT = ${bridgePortLit};
   var BRIDGE_TOKEN = ${bridgeTokenLit};
   var ROW_CLASS = 'cpx-button-row';
@@ -259,11 +270,7 @@ function buildInjectionScript(buttons, memos, bridge) {
       // Our hover isn't sized by VS Code's hover service, so the absolute
       // .monaco-hover would shrink-to-min (a tall narrow column). max-content
       // makes it hug the text and wrap at the reused .hover-contents max-width.
-      '.cpx-hover .monaco-hover{width:max-content}' +
-      // The filled-state glyph is a custom inline SVG (not a codicon), so size
-      // it to the 16px title-bar codicons and let it inherit currentColor.
-      '.cpx-focus-on{display:flex;align-items:center;justify-content:center}' +
-      '.cpx-focus-on>svg{width:16px;height:16px;display:block}';
+      '.cpx-hover .monaco-hover{width:max-content}';
     (document.head || document.documentElement).appendChild(st);
   }
 
@@ -730,10 +737,10 @@ function buildInjectionScript(buttons, memos, bridge) {
   // Build one native action item (li > a) for a button.
   function buildButtonItem(b) {
     var li = document.createElement('li');
-    li.className = 'action-item chat-input-picker-item';
+    li.className = 'action-item chat-input-picker-item' + (b.text === FOCUS_TOKEN ? ' cpx-focus-item' : '');
     li.setAttribute('role', 'presentation');
     var a = document.createElement('a');
-    a.className = 'action-label';
+    a.className = 'action-label' + (b.iconOnly ? ' compact' : '');
     a.setAttribute('role', 'button');
     a.setAttribute('tabindex', '0');
     var tip = b.description || b.text.trim();
@@ -743,15 +750,18 @@ function buildInjectionScript(buttons, memos, bridge) {
       ic.className = 'codicon codicon-' + b.icon;
       a.appendChild(ic);
     }
-    var lbl = document.createElement('span');
-    lbl.className = 'chat-input-picker-label';
-    lbl.textContent = b.label;
-    a.appendChild(lbl);
+    if (!b.iconOnly) {
+      var lbl = document.createElement('span');
+      lbl.className = 'chat-input-picker-label';
+      lbl.textContent = b.label;
+      a.appendChild(lbl);
+    }
     attachHover(a, tip);
     a.addEventListener('click', function () {
       hideHover();
       if (b.text === MEMO_TOKEN) { triggerMemo(a); return; }
       if (b.text === MEMORY_TOKEN) { triggerMemory(); return; }
+      if (b.text === FOCUS_TOKEN) { toggleChatFocus(); return; }
       submit(b.text, a, b.submit);
     });
     li.appendChild(a);
@@ -924,7 +934,6 @@ function buildInjectionScript(buttons, memos, bridge) {
   // records which parts we hid (read from the workbench's nosidebar/nopanel/
   // noauxiliarybar classes) so toggling is idempotent. Commands run via the bridge.
   var cpxFocusState = null;
-  var cpxFocusLabel = null;
 
   function wbHas(cls) {
     var e = document.querySelector('.monaco-workbench');
@@ -935,27 +944,38 @@ function buildInjectionScript(buttons, memos, bridge) {
   // column hollow instead of solid (the even-odd fill rule punches the hole).
   // Inlined because the codicon font has no hollow-centre variant.
   var CPX_FOCUS_ICON =
-    '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg">' +
+    '<svg width="1em" height="1em" viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg">' +
     '<path fill-rule="evenodd" clip-rule="evenodd" d="M3.5 1H12.5C13.879 1 15 2.121 15 3.5V12.5C15 13.879 13.879 15 12.5 15H3.5C2.121 15 1 13.879 1 12.5V3.5C1 2.121 2.121 1 3.5 1ZM2 3.5V12.5C2 13.327 2.673 14 3.5 14H6V2H3.5C2.673 2 2 2.673 2 3.5ZM12.5 14C13.327 14 14 13.327 14 12.5V3.5C14 2.673 13.327 2 12.5 2H10V14H12.5ZM7 2H9V14H7V2Z"/>' +
     '</svg>';
 
+  var _lastFocusState = undefined;
+
   function setFocusIcon() {
-    if (!cpxFocusLabel) return;
-    // Two glyphs: the native centred-layout codicon when off, our own
-    // hollow-centre SVG when filled. The pressed state is the native checked
-    // highlight. Guard the write so the per-tick re-sync from the poll loop is
-    // a no-op.
-    if (cpxFocusState) {
-      var on = 'action-label cpx-focus-on checked';
-      if (cpxFocusLabel.className !== on) {
-        cpxFocusLabel.className = on;
-        cpxFocusLabel.innerHTML = CPX_FOCUS_ICON;
-      }
-    } else {
-      var off = 'action-label codicon codicon-layout-centered';
-      if (cpxFocusLabel.className !== off) {
-        cpxFocusLabel.className = off;
-        cpxFocusLabel.innerHTML = '';
+    // No-op when state hasn't changed — this runs on every MutationObserver
+    // tick and 500ms poll, so the guard avoids needless DOM writes.
+    if (cpxFocusState === _lastFocusState) return;
+    _lastFocusState = cpxFocusState;
+    // Sync the codicon span inside every focus pill. Off state: native
+    // codicon-layout-centered (::before pseudo renders the glyph). On state:
+    // our hollow-centre SVG. We clear codicon classes when on so the
+    // pseudo-element doesn't double-render the old glyph beside the SVG.
+    var items = document.querySelectorAll('.cpx-focus-item');
+    for (var i = 0; i < items.length; i++) {
+      var a = items[i].querySelector('.action-label');
+      var ic = items[i].querySelector('.codicon, .cpx-focus-svg');
+      if (!a || !ic) continue;
+      if (cpxFocusState) {
+        if (!a.classList.contains('checked')) a.classList.add('checked');
+        if (ic.className !== 'cpx-focus-svg') {
+          ic.className = 'cpx-focus-svg';
+          ic.innerHTML = CPX_FOCUS_ICON;
+        }
+      } else {
+        a.classList.remove('checked');
+        if (ic.className !== 'codicon codicon-layout-centered') {
+          ic.className = 'codicon codicon-layout-centered';
+          ic.innerHTML = '';
+        }
       }
     }
   }
@@ -976,41 +996,6 @@ function buildInjectionScript(buttons, memos, bridge) {
     }
     setFocusIcon();
     bridgePost({ op: 'runCommands', commands: cmds });
-  }
-
-  function ensureEditorToggle() {
-    if (document.querySelector('.cpx-focus-item')) {
-      var ex = document.querySelector('.cpx-focus-item .action-label');
-      if (ex) { cpxFocusLabel = ex; setFocusIcon(); }
-      return true;
-    }
-    // Anchor on the primary-sidebar toggle (aria-label text or its codicon).
-    var anchor = null;
-    var items = document.querySelectorAll('.titlebar-right .action-label, .action-toolbar-container .action-label');
-    for (var i = 0; i < items.length; i++) {
-      var al = items[i].getAttribute('aria-label') || '';
-      if (al.indexOf('主侧栏') !== -1 || al.indexOf('Primary Side Bar') !== -1 || /\bcodicon-panel-left\b/.test(items[i].className)) { anchor = items[i]; break; }
-    }
-    if (!anchor) return false;
-    var li = anchor.closest ? anchor.closest('.action-item') : null;
-    if (!li || !li.parentNode) return false;
-    // Build our own action item right after the sidebar toggle. It is not
-    // registered with the native ActionBar, so the ActionBar attaches no click
-    // handler to it and it cannot misfire a native action. The toolbar may
-    // re-render and drop it; the schedule/poll loop re-inserts it and restores
-    // the checked state from cpxFocusState.
-    var newLi = mkEl('li', ''); newLi.className = 'action-item cpx-focus-item';
-    newLi.setAttribute('role', 'presentation');
-    var a = mkEl('a', '');
-    a.setAttribute('role', 'button'); a.setAttribute('tabindex', '0');
-    a.setAttribute('aria-label', '聊天专注（铺满/还原）'); a.title = '聊天专注（铺满/还原）';
-    a.addEventListener('mousedown', function (e) { e.preventDefault(); e.stopPropagation(); });
-    a.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); toggleChatFocus(); });
-    newLi.appendChild(a);
-    cpxFocusLabel = a;
-    setFocusIcon();
-    li.parentNode.insertBefore(newLi, li.nextSibling);
-    return true;
   }
 
   function ensureRow() {
@@ -1050,7 +1035,7 @@ function buildInjectionScript(buttons, memos, bridge) {
     (window.requestAnimationFrame || setTimeout)(function () {
       scheduled = false;
       try { ensureRow(); } catch (e) {}
-      try { ensureEditorToggle(); } catch (e) {}
+      try { setFocusIcon(); } catch (e) {}
     });
   }
 
@@ -1066,12 +1051,11 @@ function buildInjectionScript(buttons, memos, bridge) {
     var iv = setInterval(function () {
       var done = false;
       try { done = ensureRow(); } catch (e) {}
-      var tog = false;
-      try { tog = ensureEditorToggle(); } catch (e) {}
-      if ((done && tog) || ++ticks > 120) clearInterval(iv); // ~60s safety net
+      try { setFocusIcon(); } catch (e) {}
+      if (done || ++ticks > 120) clearInterval(iv); // ~60s safety net
     }, 500);
     try { ensureRow(); } catch (e) {}
-    try { ensureEditorToggle(); } catch (e) {}
+    try { setFocusIcon(); } catch (e) {}
   }
 
   if (document.readyState === 'loading') {
@@ -1231,6 +1215,9 @@ const MEMO_TOKEN = '#tool:copilot-extension/memo';
 /** Special macro token that opens the memory viewer. */
 const MEMORY_TOKEN = '#tool:copilot-extension/memory';
 
+/** Special macro token that toggles chat-focus (spread / restore). */
+const FOCUS_TOKEN = '#tool:copilot-extension/focus';
+
 /**
  * @typedef {{ label: string, text: string }} Memo
  */
@@ -1308,11 +1295,9 @@ async function runFocusCommands(commands) {
 }
 
 /**
- * Apply an operation sent by the injected script over the bridge. Memo ops:
- * `op:'set'` replaces the whole list (sanitized), `op:'copy'` copies text to the
- * clipboard.
+ * Handle a bridge request from the injected script.
  * @param {vscode.ExtensionContext} context
- * @param {{op?: string, memos?: any[], text?: string}} payload
+ * @param {{op?: string, memos?: any[], text?: string, commands?: string[], path?: string}} payload
  */
 /**
  * Resolve the user-level Copilot memory directory.

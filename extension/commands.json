@@ -1,6 +1,14 @@
 {
+  "_v": 1,
   "commands": [
     [
+      {
+        "text": "#tool:copilot-extension/focus",
+        "label": "专注",
+        "icon": "layout-centered",
+        "iconOnly": true,
+        "description": "聊天专注（铺满/还原）"
+      },
       {
         "text": "#tool:copilot-extension/memo",
         "label": "Memo",
