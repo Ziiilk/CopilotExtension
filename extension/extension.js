@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * @typedef {{ text: string, label: string, icon: string, submit: string, description: string }} MacroButton
+ * @typedef {{ text: string, label: string, icon: string, submit: string, description: string, newRow: boolean }} MacroButton
  */
 
 /**
@@ -69,19 +69,29 @@ function loadButtons(context) {
   const list = Array.isArray(data) ? data : Array.isArray(data && data.commands) ? data.commands : [];
   /** @type {Map<string, MacroButton>} */
   const byKey = new Map();
-  for (const c of list) {
-    if (!c) continue;
-    // A macro is just the text to insert; a slash command is text starting '/'.
-    const text = typeof c.text === 'string' ? c.text : '';
-    if (!text.trim() || byKey.has(text)) continue;
-    byKey.set(text, {
-      text,
-      label: typeof c.label === 'string' && c.label ? c.label : text.trim().slice(0, 24),
-      icon: typeof c.icon === 'string' ? c.icon.replace(/[^a-z0-9-]/gi, '') : '',
-      submit: String(c.submit || 'send').toLowerCase() === 'type' ? 'type' : 'send',
-      description: typeof c.description === 'string' ? c.description : ''
+  // `commands` may be a flat list of buttons, or a list of rows (each row an
+  // array of buttons). Nested arrays define the layout: every row after the
+  // first starts on a new line. A flat list still honors per-button newRow.
+  list.forEach((group, rowIdx) => {
+    const isRow = Array.isArray(group);
+    const buttons = isRow ? group : [group];
+    buttons.forEach((c, btnIdx) => {
+      if (!c) return;
+      // A macro is just the text to insert; a slash command is text starting '/'.
+      const text = typeof c.text === 'string' ? c.text : '';
+      if (!text.trim() || byKey.has(text)) return;
+      byKey.set(text, {
+        text,
+        label: typeof c.label === 'string' && c.label ? c.label : text.trim().slice(0, 24),
+        icon: typeof c.icon === 'string' ? c.icon.replace(/[^a-z0-9-]/gi, '') : '',
+        submit: String(c.submit || 'send').toLowerCase() === 'type' ? 'type' : 'send',
+        description: typeof c.description === 'string' ? c.description : '',
+        // A nested row breaks the line at its first button (except the first row);
+        // a flat entry honors its explicit newRow/break flag.
+        newRow: isRow ? (btnIdx === 0 && rowIdx > 0) : !!(c.newRow || c.break)
+      });
     });
-  }
+  });
   return [...byKey.values()];
 }
 
@@ -226,6 +236,7 @@ function buildInjectionScript(buttons, memos, bridge) {
   var BUTTONS = ${data};
   var MEMOS = ${memoData};
   var MEMO_TOKEN = ${JSON.stringify(MEMO_TOKEN)};
+  var MEMORY_TOKEN = ${JSON.stringify(MEMORY_TOKEN)};
   var BRIDGE_PORT = ${bridgePortLit};
   var BRIDGE_TOKEN = ${bridgeTokenLit};
   var ROW_CLASS = 'cpx-button-row';
@@ -239,7 +250,9 @@ function buildInjectionScript(buttons, memos, bridge) {
     var st = document.createElement('style');
     st.id = 'cpx-style';
     st.textContent =
-      '.cpx-button-row{max-width:none}' +
+      // Stack toolbar groups vertically so a button flagged newRow begins a
+      // fresh line; align-items keeps every line flush-left under the offset.
+      '.cpx-button-row{max-width:none;display:flex;flex-direction:column;align-items:flex-start;gap:4px}' +
       '.cpx-button-row>.chat-input-toolbar{width:auto;min-width:0;overflow:visible}' +
       '.cpx-button-row .action-label{cursor:pointer}' +
       '.cpx-button-row .action-label:hover{background-color:var(--vscode-toolbar-hoverBackground)}' +
@@ -355,16 +368,23 @@ function buildInjectionScript(buttons, memos, bridge) {
     memoRoot = null;
   }
 
-  function bridgePost(payload) {
-    if (!BRIDGE_PORT) return;
+  // POST a payload to the loopback bridge. When cb is given, the JSON response
+  // is parsed and passed to it (null on failure); otherwise it's fire-and-forget.
+  function bridgeRequest(payload, cb) {
+    if (!BRIDGE_PORT) { if (cb) cb(null); return; }
     try {
-      fetch('http://127.0.0.1:' + BRIDGE_PORT + '/?token=' + encodeURIComponent(BRIDGE_TOKEN), {
+      var p = fetch('http://127.0.0.1:' + BRIDGE_PORT + '/?token=' + encodeURIComponent(BRIDGE_TOKEN), {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain' },
         body: JSON.stringify(payload)
-      }).catch(function () {});
-    } catch (e) {}
+      });
+      if (cb) p.then(function (r) { return r.json(); }).then(cb).catch(function () { cb(null); });
+      else p.catch(function () {});
+    } catch (e) { if (cb) cb(null); }
   }
+
+  function bridgePost(payload) { bridgeRequest(payload); }
+  function bridgeFetch(payload, cb) { bridgeRequest(payload, cb); }
 
   function mkEl(tag, css, text) {
     var e = document.createElement(tag);
@@ -392,37 +412,34 @@ function buildInjectionScript(buttons, memos, bridge) {
     return b;
   }
 
-  function openMemoManager(anchor) {
-    hideMemo();
-    var wb = 'var(--vscode-editorWidget-border, var(--vscode-widget-border, var(--vscode-contrastBorder, transparent)))';
-
-    // Replicate VS Code's native modal-editor shell — the very chrome the
-    // built-in "语言模型" manager uses. By reusing the same class hierarchy the
-    // workbench's own stylesheet themes our window: dimmed full-screen block, a
-    // centered window with shadow-xl + 8px radius, a titleBar-colored header
-    // (title + close action), and an editor-background body.
+  // Build VS Code's native modal-editor shell — the chrome the built-in
+  // managers use: a dimmed full-screen block, a centered shadowed window, and a
+  // titleBar-colored header (icon + title + a close action). Backdrop click and
+  // Esc both close. Returns the pieces a manager fills in; the caller appends
+  // its own body to the part node and may add extra buttons before closeBtn.
+  function buildModalShell(opts) {
     var block = mkEl('div', '');
-    block.className = 'monaco-modal-editor-block cpx-memo';
-    var resizable = mkEl('div', 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:min(1080px, 90vw);height:min(660px, 86vh)');
+    block.className = 'monaco-modal-editor-block ' + opts.cssClass;
+    var resizable = mkEl('div', 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:' + opts.width + ';height:' + opts.height);
     resizable.className = 'modal-editor-resizable';
     var shadow = mkEl('div', '');
     shadow.className = 'modal-editor-shadow';
     var part = mkEl('div', '');
     part.className = 'modal-editor-part';
 
-    // Header: native title bar (its grid/colors come from .modal-editor-header).
     var header = mkEl('div', '');
     header.className = 'modal-editor-header';
     var title = mkEl('div', '');
     title.className = 'modal-editor-title';
     var tIcon = mkEl('span', 'margin-right:6px;vertical-align:middle');
-    tIcon.className = 'codicon codicon-note';
+    tIcon.className = 'codicon codicon-' + opts.icon;
     title.appendChild(tIcon);
-    title.appendChild(mkEl('span', 'vertical-align:middle', '备忘录'));
+    title.appendChild(mkEl('span', 'vertical-align:middle', opts.title));
     var actions = mkEl('div', '');
     actions.className = 'modal-editor-action-container';
     var actbar = mkEl('div', 'display:flex;align-items:center;gap:2px');
     actbar.className = 'actions-container';
+
     function titleAction(icon, tip) {
       var a = mkEl('a', 'width:28px;height:28px;display:flex;align-items:center;justify-content:center;border-radius:5px;cursor:pointer;color:inherit');
       a.className = 'action-label codicon codicon-' + icon;
@@ -430,23 +447,47 @@ function buildInjectionScript(buttons, memos, bridge) {
       hoverBg(a, '--vscode-toolbar-hoverBackground');
       return a;
     }
-    var maximized = false;
-    var maxBtn = titleAction('screen-full', '最大化');
-    maxBtn.addEventListener('click', function () {
-      maximized = !maximized;
-      resizable.style.width = maximized ? '96vw' : 'min(1080px, 90vw)';
-      resizable.style.height = maximized ? '92vh' : 'min(660px, 86vh)';
-      maxBtn.classList.remove(maximized ? 'codicon-screen-full' : 'codicon-screen-normal');
-      maxBtn.classList.add(maximized ? 'codicon-screen-normal' : 'codicon-screen-full');
-      maxBtn.title = maximized ? '还原' : '最大化';
-    });
     var closeBtn = titleAction('close', '关闭 (Esc)');
-    closeBtn.addEventListener('click', hideMemo);
-    actbar.appendChild(maxBtn);
+    closeBtn.addEventListener('click', opts.onClose);
     actbar.appendChild(closeBtn);
     actions.appendChild(actbar);
     header.appendChild(title);
     header.appendChild(actions);
+
+    part.appendChild(header);
+    shadow.appendChild(part);
+    resizable.appendChild(shadow);
+    block.appendChild(resizable);
+    block.addEventListener('mousedown', function (e) { if (e.target === block) opts.onClose(); });
+    block.addEventListener('keydown', function (e) { if (e.key === 'Escape') opts.onClose(); });
+
+    // Mount inside .monaco-workbench (not document.body) so the workbench's
+    // theme variables and .modal-editor-* rules apply.
+    (document.querySelector('.monaco-workbench') || document.body).appendChild(block);
+    return { block: block, part: part, resizable: resizable, actbar: actbar, closeBtn: closeBtn, titleAction: titleAction };
+  }
+
+  function openMemoManager(anchor) {
+    hideMemo();
+    var wb = 'var(--vscode-editorWidget-border, var(--vscode-widget-border, var(--vscode-contrastBorder, transparent)))';
+
+    // Native modal-editor shell (block/header/close/backdrop), themed by the
+    // workbench's own .modal-editor-* rules — the chrome the built-in "语言模型"
+    // manager uses. We add a maximize toggle before the close button.
+    var DEF_W = 'min(1080px, 90vw)', DEF_H = 'min(660px, 86vh)';
+    var shell = buildModalShell({ cssClass: 'cpx-memo', icon: 'note', title: '备忘录', width: DEF_W, height: DEF_H, onClose: hideMemo });
+    var block = shell.block, part = shell.part;
+    var maximized = false;
+    var maxBtn = shell.titleAction('screen-full', '最大化');
+    maxBtn.addEventListener('click', function () {
+      maximized = !maximized;
+      shell.resizable.style.width = maximized ? '96vw' : DEF_W;
+      shell.resizable.style.height = maximized ? '92vh' : DEF_H;
+      maxBtn.classList.remove(maximized ? 'codicon-screen-full' : 'codicon-screen-normal');
+      maxBtn.classList.add(maximized ? 'codicon-screen-normal' : 'codicon-screen-full');
+      maxBtn.title = maximized ? '还原' : '最大化';
+    });
+    shell.actbar.insertBefore(maxBtn, shell.closeBtn);
 
     // Body: toolbar (search + add) over a scrollable table.
     var bodyWrap = mkEl('div', 'grid-row:2;grid-column:1 / -1;display:flex;flex-direction:column;overflow:hidden;background:var(--vscode-editor-background);color:var(--vscode-foreground);font-family:var(--vscode-font-family);font-size:13px');
@@ -529,15 +570,7 @@ function buildInjectionScript(buttons, memos, bridge) {
     bodyWrap.appendChild(tableEl);
     bodyWrap.appendChild(form);
 
-    part.appendChild(header);
     part.appendChild(bodyWrap);
-    shadow.appendChild(part);
-    resizable.appendChild(shadow);
-    block.appendChild(resizable);
-    // Mount inside .monaco-workbench (not document.body) so the workbench's
-    // theme variables (--vscode-*) and .modal-editor-* rules apply.
-    var mountHost = document.querySelector('.monaco-workbench') || document.body;
-    mountHost.appendChild(block);
     memoRoot = block;
 
     function visible() {
@@ -609,8 +642,6 @@ function buildInjectionScript(buttons, memos, bridge) {
       persist();
       render();
     });
-    block.addEventListener('mousedown', function (e) { if (e.target === block) hideMemo(); });
-    block.addEventListener('keydown', function (e) { if (e.key === 'Escape') hideMemo(); });
 
     render();
     search.focus();
@@ -626,6 +657,67 @@ function buildInjectionScript(buttons, memos, bridge) {
     }
   }
 
+  // ---- Memory viewer (in-DOM, native-styled) --------------------------------
+  var memoryRoot = null;
+
+  function hideMemory() {
+    if (memoryRoot && memoryRoot.parentNode) memoryRoot.parentNode.removeChild(memoryRoot);
+    memoryRoot = null;
+  }
+
+  function openMemoryViewer(scopes) {
+    hideMemory();
+    var shell = buildModalShell({ cssClass: 'cpx-memory', icon: 'book', title: '记忆查看器', width: 'min(640px, 80vw)', height: 'min(480px, 72vh)', onClose: hideMemory });
+    var block = shell.block;
+
+    var bodyWrap = mkEl('div', 'grid-row:2;grid-column:1 / -1;display:flex;flex-direction:column;overflow:hidden;background:var(--vscode-editor-background);color:var(--vscode-foreground);font-family:var(--vscode-font-family);font-size:13px');
+    var contentArea = mkEl('div', 'flex:1 1 auto;overflow:auto;padding:8px 0');
+
+    if (!scopes || !scopes.length) {
+      contentArea.appendChild(mkEl('div', 'padding:14px;color:var(--vscode-descriptionForeground)', '没有找到任何记忆文件。'));
+    } else {
+      scopes.forEach(function (scope) {
+        var section = mkEl('div', 'margin-bottom:4px');
+        var sHeader = mkEl('div', 'padding:6px 16px;font-weight:700;font-size:11px;text-transform:uppercase;color:var(--vscode-foreground);opacity:0.8');
+        sHeader.textContent = scope.label;
+        section.appendChild(sHeader);
+        (scope.files || []).forEach(function (f) {
+          var row = mkEl('div', 'display:flex;align-items:center;padding:4px 16px 4px 28px;cursor:pointer');
+          hoverBg(row, '--vscode-list-hoverBackground');
+          var icon = mkEl('span', 'margin-right:8px;flex:0 0 auto;opacity:0.75');
+          icon.className = 'codicon codicon-file';
+          var label = mkEl('span', 'flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap');
+          label.textContent = f.name;
+          label.title = f.path;
+          row.appendChild(icon);
+          row.appendChild(label);
+          row.addEventListener('click', function () {
+            bridgePost({ op: 'openMemory', path: f.path });
+            hideMemory();
+          });
+          section.appendChild(row);
+        });
+        contentArea.appendChild(section);
+      });
+    }
+
+    bodyWrap.appendChild(contentArea);
+    shell.part.appendChild(bodyWrap);
+    memoryRoot = block;
+
+    block.setAttribute('tabindex', '-1');
+    block.focus();
+  }
+
+  function triggerMemory() {
+    bridgeFetch({ op: 'listMemory' }, function (data) {
+      if (!data || !data.scopes) return;
+      try { openMemoryViewer(data.scopes); } catch (e) {
+        console.error('[cpx] memory viewer failed:', e);
+      }
+    });
+  }
+
   // Build the row by REPLICATING the native pill structure and class names, so
   // the workbench's own stylesheet rules style it (font, padding, icon size,
   // color, separators, gap, spacing …). Nothing is hard-coded; if VS Code
@@ -635,9 +727,39 @@ function buildInjectionScript(buttons, memos, bridge) {
   //   .chat-input-toolbars > .chat-input-toolbar > .monaco-action-bar
   //     > ul.actions-container > li.action-item.chat-input-picker-item
   //       > a.action-label > span.codicon.codicon-<x> + span.chat-input-picker-label
-  function buildRow() {
-    var root = document.createElement('div');
-    root.className = ROW_CLASS + ' chat-input-toolbars';
+  // Build one native action item (li > a) for a button.
+  function buildButtonItem(b) {
+    var li = document.createElement('li');
+    li.className = 'action-item chat-input-picker-item';
+    li.setAttribute('role', 'presentation');
+    var a = document.createElement('a');
+    a.className = 'action-label';
+    a.setAttribute('role', 'button');
+    a.setAttribute('tabindex', '0');
+    var tip = b.description || b.text.trim();
+    a.setAttribute('aria-label', tip);
+    if (b.icon) {
+      var ic = document.createElement('span');
+      ic.className = 'codicon codicon-' + b.icon;
+      a.appendChild(ic);
+    }
+    var lbl = document.createElement('span');
+    lbl.className = 'chat-input-picker-label';
+    lbl.textContent = b.label;
+    a.appendChild(lbl);
+    attachHover(a, tip);
+    a.addEventListener('click', function () {
+      hideHover();
+      if (b.text === MEMO_TOKEN) { triggerMemo(a); return; }
+      if (b.text === MEMORY_TOKEN) { triggerMemory(); return; }
+      submit(b.text, a, b.submit);
+    });
+    li.appendChild(a);
+    return li;
+  }
+
+  // One toolbar line: returns the toolbar node plus the action list to fill.
+  function buildToolbarLine() {
     var tb = document.createElement('div');
     tb.className = 'chat-input-toolbar';
     var bar = document.createElement('div');
@@ -645,37 +767,25 @@ function buildInjectionScript(buttons, memos, bridge) {
     var ul = document.createElement('ul');
     ul.className = 'actions-container';
     ul.setAttribute('role', 'toolbar');
-    BUTTONS.forEach(function (b) {
-      var li = document.createElement('li');
-      li.className = 'action-item chat-input-picker-item';
-      li.setAttribute('role', 'presentation');
-      var a = document.createElement('a');
-      a.className = 'action-label';
-      a.setAttribute('role', 'button');
-      a.setAttribute('tabindex', '0');
-      var tip = b.description || b.text.trim();
-      a.setAttribute('aria-label', tip);
-      if (b.icon) {
-        var ic = document.createElement('span');
-        ic.className = 'codicon codicon-' + b.icon;
-        a.appendChild(ic);
-      }
-      var lbl = document.createElement('span');
-      lbl.className = 'chat-input-picker-label';
-      lbl.textContent = b.label;
-      a.appendChild(lbl);
-      attachHover(a, tip);
-      a.addEventListener('click', function () {
-        hideHover();
-        if (b.text === MEMO_TOKEN) { triggerMemo(a); return; }
-        submit(b.text, a, b.submit);
-      });
-      li.appendChild(a);
-      ul.appendChild(li);
-    });
     bar.appendChild(ul);
     tb.appendChild(bar);
-    root.appendChild(tb);
+    return { toolbar: tb, actionList: ul };
+  }
+
+  function buildRow() {
+    var root = document.createElement('div');
+    root.className = ROW_CLASS + ' chat-input-toolbars';
+    // Each button flagged newRow starts a fresh toolbar line; all lines stack
+    // vertically (CSS column) under the same left offset.
+    var line = buildToolbarLine();
+    root.appendChild(line.toolbar);
+    BUTTONS.forEach(function (b, idx) {
+      if (b.newRow && idx > 0) {
+        line = buildToolbarLine();
+        root.appendChild(line.toolbar);
+      }
+      line.actionList.appendChild(buildButtonItem(b));
+    });
     return root;
   }
 
@@ -1118,6 +1228,9 @@ async function editConfig(context) {
 /** Special macro token (a commands.json `text`) that opens the memo manager. */
 const MEMO_TOKEN = '#tool:copilot-extension/memo';
 
+/** Special macro token that opens the memory viewer. */
+const MEMORY_TOKEN = '#tool:copilot-extension/memory';
+
 /**
  * @typedef {{ label: string, text: string }} Memo
  */
@@ -1201,6 +1314,47 @@ async function runFocusCommands(commands) {
  * @param {vscode.ExtensionContext} context
  * @param {{op?: string, memos?: any[], text?: string}} payload
  */
+/**
+ * Resolve the user-level Copilot memory directory.
+ * @param {vscode.ExtensionContext} context
+ * @returns {string}
+ */
+function memoryUserDir(context) {
+  return path.join(path.dirname(context.globalStorageUri.fsPath), 'github.copilot-chat', 'memory-tool', 'memories');
+}
+
+/**
+ * Resolve the workspace-level Copilot memory directory.
+ * @param {vscode.ExtensionContext} context
+ * @returns {string|null}
+ */
+function memoryWorkspaceDir(context) {
+  if (!context.storageUri) return null;
+  const base = path.dirname(context.storageUri.fsPath);
+  for (const name of ['GitHub.copilot-chat', 'github.copilot-chat']) {
+    const d = path.join(base, name, 'memory-tool', 'memories');
+    // Read the dir directly to both confirm it exists and pick the right
+    // casing variant in one syscall (no separate stat existence pre-check).
+    try { fs.readdirSync(d); return d; } catch { /* try next */ }
+  }
+  return null;
+}
+
+/**
+ * List .md files directly inside a directory.
+ * @param {string} dir
+ * @returns {{name: string, path: string}[]}
+ */
+function listMdFiles(dir) {
+  const out = [];
+  try {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (e.isFile() && e.name.endsWith('.md')) out.push({ name: e.name, path: path.join(dir, e.name) });
+    }
+  } catch { /* dir doesn't exist */ }
+  return out;
+}
+
 function handleBridge(context, payload) {
   if (!payload || typeof payload !== 'object') return;
   if (payload.op === 'set' && Array.isArray(payload.memos)) {
@@ -1209,6 +1363,28 @@ function handleBridge(context, payload) {
     vscode.env.clipboard.writeText(payload.text).then(undefined, () => { /* ignore */ });
   } else if (payload.op === 'runCommands' && Array.isArray(payload.commands)) {
     runFocusCommands(payload.commands);
+  } else if (payload.op === 'listMemory') {
+    const scopes = [];
+    const userDir = memoryUserDir(context);
+    const userFiles = listMdFiles(userDir);
+    if (userFiles.length) scopes.push({ id: 'user', label: '用户记忆', files: userFiles });
+    const wsDir = memoryWorkspaceDir(context);
+    if (wsDir) {
+      const repoFiles = listMdFiles(path.join(wsDir, 'repo'));
+      if (repoFiles.length) scopes.push({ id: 'repo', label: '项目记忆', files: repoFiles });
+      const sessionFiles = listMdFiles(path.join(wsDir, 'session'));
+      if (sessionFiles.length) scopes.push({ id: 'session', label: '会话记忆', files: sessionFiles });
+    }
+    return { scopes };
+  } else if (payload.op === 'openMemory' && typeof payload.path === 'string') {
+    const norm = path.normalize(payload.path);
+    const allowed = [memoryUserDir(context), memoryWorkspaceDir(context)].filter(Boolean).map(d => path.normalize(d));
+    if (allowed.some(d => norm.startsWith(d + path.sep) || norm === d)) {
+      vscode.workspace.openTextDocument(vscode.Uri.file(norm)).then(
+        doc => vscode.window.showTextDocument(doc),
+        () => { /* ignore */ }
+      );
+    }
   }
 }
 
@@ -1239,7 +1415,11 @@ function startBridge(context) {
       let body = '';
       req.on('data', (c) => { body += c; if (body.length > 1e6) req.destroy(); });
       req.on('end', () => {
-        try { handleBridge(context, JSON.parse(body || '{}')); res.writeHead(200); res.end('ok'); }
+        try {
+          const result = handleBridge(context, JSON.parse(body || '{}'));
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result != null ? result : { ok: true }));
+        }
         catch { res.writeHead(400); res.end(); }
       });
       return;
