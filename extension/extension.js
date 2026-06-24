@@ -949,7 +949,7 @@ function buildInjectionScript(buttons, memos, bridge) {
     return !!(e && e.classList.contains(cls));
   }
 
-  // Filled-state glyph: the codicon-layout-centered shape but with its centre
+  // Restored-state glyph: the codicon-layout-centered shape but with its centre
   // column hollow instead of solid (the even-odd fill rule punches the hole).
   // Inlined because the codicon font has no hollow-centre variant.
   var CPX_FOCUS_ICON =
@@ -957,17 +957,17 @@ function buildInjectionScript(buttons, memos, bridge) {
     '<path fill-rule="evenodd" clip-rule="evenodd" d="M3.5 1H12.5C13.879 1 15 2.121 15 3.5V12.5C15 13.879 13.879 15 12.5 15H3.5C2.121 15 1 13.879 1 12.5V3.5C1 2.121 2.121 1 3.5 1ZM2 3.5V12.5C2 13.327 2.673 14 3.5 14H6V2H3.5C2.673 2 2 2.673 2 3.5ZM12.5 14C13.327 14 14 13.327 14 12.5V3.5C14 2.673 13.327 2 12.5 2H10V14H12.5ZM7 2H9V14H7V2Z"/>' +
     '</svg>';
 
-  var _lastFocusState = undefined;
+  // Icon-span class for each focus state. Filled = native solid codicon;
+  // restored = our hollow-centre SVG (cleared codicon classes so the codicon
+  // pseudo-element doesn't double-render beside the SVG).
+  var FOCUS_GLYPH_FILLED = 'codicon codicon-layout-centered';
+  var FOCUS_GLYPH_HOLLOW = 'cpx-focus-svg';
 
   function setFocusIcon() {
-    // No-op when state hasn't changed — this runs on every MutationObserver
-    // tick and 500ms poll, so the guard avoids needless DOM writes.
-    if (cpxFocusState === _lastFocusState) return;
-    _lastFocusState = cpxFocusState;
-    // Sync the codicon span inside every focus pill. Off state: native
-    // codicon-layout-centered (::before pseudo renders the glyph). On state:
-    // our hollow-centre SVG. We clear codicon classes when on so the
-    // pseudo-element doesn't double-render the old glyph beside the SVG.
+    // Sync the icon span inside every focus pill. The per-element className
+    // guards below make redundant ticks a no-op; we can't short-circuit on
+    // cpxFocusState alone because ensureRow may rebuild the pill with the
+    // default solid codicon, which must then be re-synced to the current state.
     var items = document.querySelectorAll('.cpx-focus-item');
     for (var i = 0; i < items.length; i++) {
       var a = items[i].querySelector('.action-label');
@@ -975,15 +975,15 @@ function buildInjectionScript(buttons, memos, bridge) {
       if (!a || !ic) continue;
       if (cpxFocusState) {
         if (!a.classList.contains('checked')) a.classList.add('checked');
-        if (ic.className !== 'cpx-focus-svg') {
-          ic.className = 'cpx-focus-svg';
-          ic.innerHTML = CPX_FOCUS_ICON;
+        if (ic.className !== FOCUS_GLYPH_FILLED) {
+          ic.className = FOCUS_GLYPH_FILLED;
+          ic.innerHTML = '';
         }
       } else {
         a.classList.remove('checked');
-        if (ic.className !== 'codicon codicon-layout-centered') {
-          ic.className = 'codicon codicon-layout-centered';
-          ic.innerHTML = '';
+        if (ic.className !== FOCUS_GLYPH_HOLLOW) {
+          ic.className = FOCUS_GLYPH_HOLLOW;
+          ic.innerHTML = CPX_FOCUS_ICON;
         }
       }
     }
