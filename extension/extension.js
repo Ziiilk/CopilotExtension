@@ -247,6 +247,7 @@ function buildInjectionScript(buttons, memos, bridge) {
   var MEMOS = ${memoData};
   var MEMO_TOKEN = ${JSON.stringify(MEMO_TOKEN)};
   var MEMORY_TOKEN = ${JSON.stringify(MEMORY_TOKEN)};
+  var TERMINALS_TOKEN = ${JSON.stringify(TERMINALS_TOKEN)};
   var FOCUS_TOKEN = ${JSON.stringify(FOCUS_TOKEN)};
   var BRIDGE_PORT = ${bridgePortLit};
   var BRIDGE_TOKEN = ${bridgeTokenLit};
@@ -267,6 +268,12 @@ function buildInjectionScript(buttons, memos, bridge) {
       '.cpx-button-row>.chat-input-toolbar{width:auto;min-width:0;overflow:visible}' +
       '.cpx-button-row .action-label{cursor:pointer}' +
       '.cpx-button-row .action-label:hover{background-color:var(--vscode-toolbar-hoverBackground)}' +
+      // Top-right count bubble on the Terminals button (cleanable idle count).
+      // The action-bar chain clips overflow by default, so open it up along the
+      // whole path or the bubble's protruding corner gets cut off.
+      '.cpx-button-row .monaco-action-bar,.cpx-button-row .actions-container,.cpx-button-row .action-item{overflow:visible}' +
+      '.cpx-terminals-item{position:relative;overflow:visible}' +
+      '.cpx-term-badge{position:absolute;top:0;right:-7px;display:none;min-width:14px;height:14px;box-sizing:border-box;padding:0 4px;border-radius:8px;font-size:9px;line-height:14px;font-weight:600;text-align:center;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);pointer-events:none;z-index:5}' +
       // Our hover isn't sized by VS Code's hover service, so the absolute
       // .monaco-hover would shrink-to-min (a tall narrow column). max-content
       // makes it hug the text and wrap at the reused .hover-contents max-width.
@@ -734,6 +741,142 @@ function buildInjectionScript(buttons, memos, bridge) {
     });
   }
 
+  // ---- Terminal viewer (in-DOM, native-styled) ------------------------------
+  // Lists every workbench terminal (including ones hidden from the user) and
+  // offers a one-click cleanup of all completed/inactive terminals. The data is
+  // fetched from the loopback bridge; mutating ops re-render from the response.
+  var terminalsRoot = null;
+
+  function hideTerminals() {
+    if (terminalsRoot && terminalsRoot.parentNode) terminalsRoot.parentNode.removeChild(terminalsRoot);
+    terminalsRoot = null;
+  }
+
+  function openTerminalViewer(terminals) {
+    hideTerminals();
+    var shell = buildModalShell({ cssClass: 'cpx-terminals', icon: 'terminal', title: '终端查看器', width: 'min(640px, 80vw)', height: 'min(480px, 72vh)', onClose: hideTerminals });
+    var block = shell.block;
+
+    var bodyWrap = mkEl('div', 'grid-row:2;grid-column:1 / -1;display:flex;flex-direction:column;overflow:hidden;background:var(--vscode-editor-background);color:var(--vscode-foreground);font-family:var(--vscode-font-family);font-size:13px');
+    var bar = mkEl('div', 'display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--vscode-editorWidget-border, var(--vscode-widget-border, transparent))');
+    var countLbl = mkEl('div', 'flex:1 1 auto;min-width:0;color:var(--vscode-descriptionForeground);overflow:hidden;text-overflow:ellipsis;white-space:nowrap');
+    var cleanBtn = memoBtn('清理空闲终端', false);
+    var cleanIcon = mkEl('span', 'margin-right:4px;font-size:16px;line-height:16px');
+    cleanIcon.className = 'codicon codicon-trash';
+    cleanBtn.insertBefore(cleanIcon, cleanBtn.firstChild);
+    bar.appendChild(countLbl);
+    bar.appendChild(cleanBtn);
+
+    var contentArea = mkEl('div', 'flex:1 1 auto;overflow:auto;padding:6px 0');
+
+    bodyWrap.appendChild(bar);
+    bodyWrap.appendChild(contentArea);
+    shell.part.appendChild(bodyWrap);
+    terminalsRoot = block;
+
+    function render(list) {
+      list = list || [];
+      contentArea.textContent = '';
+      var done = cleanableCount(list);
+      countLbl.textContent = '共 ' + list.length + ' 个终端，' + done + ' 个可清理';
+      cleanBtn.style.opacity = done ? '1' : '.5';
+      cleanBtn.style.pointerEvents = done ? 'auto' : 'none';
+      terminalBadgeCount = done;
+      try { updateTerminalBadge(); } catch (e) {}
+      if (!list.length) {
+        contentArea.appendChild(mkEl('div', 'padding:14px;color:var(--vscode-descriptionForeground)', '没有打开的终端。'));
+        return;
+      }
+      list.forEach(function (t) {
+        var row = mkEl('div', 'display:flex;align-items:center;padding:5px 16px;cursor:pointer');
+        hoverBg(row, '--vscode-list-hoverBackground');
+        var icon = mkEl('span', 'margin-right:8px;flex:0 0 auto');
+        if (t.state === 'busy') {
+          icon.className = 'codicon codicon-circle-filled';
+          icon.style.color = 'var(--vscode-charts-green, var(--vscode-terminal-ansiGreen))';
+        } else if (t.state === 'idle') {
+          icon.className = 'codicon codicon-circle-outline';
+          icon.style.opacity = '0.8';
+        } else {
+          icon.className = 'codicon codicon-circle-slash';
+          icon.style.opacity = '0.7';
+        }
+        var label = mkEl('span', 'flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap');
+        label.textContent = t.name + (t.active ? '  (活动)' : '');
+        label.title = t.name;
+        var status = mkEl('span', 'flex:0 0 auto;margin-left:8px;font-size:11px;color:var(--vscode-descriptionForeground)');
+        status.textContent =
+          t.state === 'busy' ? '运行中' :
+          t.state === 'idle' ? '空闲' :
+          t.exitCode == null ? '已退出' : '已退出 (' + t.exitCode + ')';
+        row.appendChild(icon);
+        row.appendChild(label);
+        row.appendChild(status);
+        row.addEventListener('click', function () {
+          bridgePost({ op: 'showTerminal', index: t.index });
+          hideTerminals();
+        });
+        contentArea.appendChild(row);
+      });
+    }
+
+    cleanBtn.addEventListener('click', function () {
+      bridgeFetch({ op: 'cleanupTerminals' }, function (data) {
+        if (data && data.terminals) render(data.terminals);
+      });
+    });
+
+    render(terminals);
+    block.setAttribute('tabindex', '-1');
+    block.focus();
+  }
+
+  function triggerTerminals() {
+    bridgeFetch({ op: 'listTerminals' }, function (data) {
+      if (!data) return;
+      try { openTerminalViewer(data.terminals || []); } catch (e) {
+        console.error('[cpx] terminal viewer failed:', e);
+      }
+    });
+  }
+
+  // Count of cleanable (idle/exited, i.e. not-busy) terminals, shown as a bubble
+  // on the Terminals button. Polled from the bridge and re-applied after every
+  // row rebuild (ensureRow may recreate the button with an empty badge).
+  var terminalBadgeCount = 0;
+
+  function cleanableCount(list) {
+    var n = 0;
+    list.forEach(function (t) { if (t.state !== 'busy') n++; });
+    return n;
+  }
+
+  function updateTerminalBadge() {
+    var items = document.querySelectorAll('.cpx-terminals-item');
+    for (var i = 0; i < items.length; i++) {
+      var badge = items[i].querySelector('.cpx-term-badge');
+      if (!badge) continue;
+      if (terminalBadgeCount > 0) {
+        var txt = terminalBadgeCount > 99 ? '99+' : String(terminalBadgeCount);
+        if (badge.textContent !== txt) badge.textContent = txt;
+        if (badge.style.display !== 'block') badge.style.display = 'block';
+      } else if (badge.style.display !== 'none') {
+        badge.style.display = 'none';
+      }
+    }
+  }
+
+  function pollTerminalBadge() {
+    // No button mounted (e.g. chat closed) means nothing to update — skip the
+    // bridge round-trip entirely rather than polling the host every few seconds.
+    if (!document.querySelector('.cpx-terminals-item')) return;
+    bridgeFetch({ op: 'listTerminals' }, function (data) {
+      if (!data || !data.terminals) return;
+      terminalBadgeCount = cleanableCount(data.terminals);
+      updateTerminalBadge();
+    });
+  }
+
   // Build the row by REPLICATING the native pill structure and class names, so
   // the workbench's own stylesheet rules style it (font, padding, icon size,
   // color, separators, gap, spacing …). Nothing is hard-coded; if VS Code
@@ -746,7 +889,7 @@ function buildInjectionScript(buttons, memos, bridge) {
   // Build one native action item (li > a) for a button.
   function buildButtonItem(b) {
     var li = document.createElement('li');
-    li.className = 'action-item chat-input-picker-item' + (b.text === FOCUS_TOKEN ? ' cpx-focus-item' : '');
+    li.className = 'action-item chat-input-picker-item' + (b.text === FOCUS_TOKEN ? ' cpx-focus-item' : '') + (b.text === TERMINALS_TOKEN ? ' cpx-terminals-item' : '');
     li.setAttribute('role', 'presentation');
     var a = document.createElement('a');
     a.className = 'action-label' + (b.iconOnly ? ' compact' : '');
@@ -770,10 +913,16 @@ function buildInjectionScript(buttons, memos, bridge) {
       hideHover();
       if (b.text === MEMO_TOKEN) { triggerMemo(a); return; }
       if (b.text === MEMORY_TOKEN) { triggerMemory(); return; }
+      if (b.text === TERMINALS_TOKEN) { triggerTerminals(); return; }
       if (b.text === FOCUS_TOKEN) { toggleChatFocus(); return; }
       submit(b.text, a, b.submit);
     });
     li.appendChild(a);
+    if (b.text === TERMINALS_TOKEN) {
+      var badge = document.createElement('span');
+      badge.className = 'cpx-term-badge';
+      li.appendChild(badge);
+    }
     return li;
   }
 
@@ -1045,6 +1194,7 @@ function buildInjectionScript(buttons, memos, bridge) {
       scheduled = false;
       try { ensureRow(); } catch (e) {}
       try { setFocusIcon(); } catch (e) {}
+      try { updateTerminalBadge(); } catch (e) {}
     });
   }
 
@@ -1061,10 +1211,13 @@ function buildInjectionScript(buttons, memos, bridge) {
       var done = false;
       try { done = ensureRow(); } catch (e) {}
       try { setFocusIcon(); } catch (e) {}
+      try { updateTerminalBadge(); } catch (e) {}
       if (done || ++ticks > 120) clearInterval(iv); // ~60s safety net
     }, 500);
     try { ensureRow(); } catch (e) {}
     try { setFocusIcon(); } catch (e) {}
+    try { pollTerminalBadge(); } catch (e) {}
+    setInterval(function () { try { pollTerminalBadge(); } catch (e) {} }, 3000);
   }
 
   if (document.readyState === 'loading') {
@@ -1224,6 +1377,9 @@ const MEMO_TOKEN = '#tool:copilot-extension/memo';
 /** Special macro token that opens the memory viewer. */
 const MEMORY_TOKEN = '#tool:copilot-extension/memory';
 
+/** Special macro token that opens the terminal viewer. */
+const TERMINALS_TOKEN = '#tool:copilot-extension/terminals';
+
 /** Special macro token that toggles chat-focus (spread / restore). */
 const FOCUS_TOKEN = '#tool:copilot-extension/focus';
 
@@ -1349,7 +1505,43 @@ function listMdFiles(dir) {
   return out;
 }
 
-function handleBridge(context, payload) {
+/**
+ * Terminals that are currently executing a shell command, tracked via the
+ * shell-integration execution events. A terminal NOT in this set is idle (its
+ * command finished and it sits at a prompt) — that's the "completed/inactive"
+ * case the cleanup targets, distinct from a still-running command. exitStatus
+ * (whole shell process gone) is a third, separate state.
+ * @type {Set<vscode.Terminal>}
+ */
+const busyTerminals = new Set();
+
+/**
+ * Snapshot every workbench terminal (including ones hidden from the user, which
+ * are still present in vscode.window.terminals). `state` is one of:
+ *   'busy'   — a shell command is currently executing (active, not cleanable)
+ *   'idle'   — shell alive but at a prompt, command finished (cleanable)
+ *   'exited' — the shell process itself has exited (cleanable)
+ * `index` is the live position used as an opaque handle for showTerminal.
+ * @returns {{index:number,name:string,state:string,exitCode:number|null,active:boolean}[]}
+ */
+function listTerminalsData() {
+  const active = vscode.window.activeTerminal;
+  return vscode.window.terminals.map((t, i) => {
+    let state;
+    if (t.exitStatus) state = 'exited';
+    else if (busyTerminals.has(t)) state = 'busy';
+    else state = 'idle';
+    return {
+      index: i,
+      name: t.name,
+      state,
+      exitCode: t.exitStatus ? (t.exitStatus.code == null ? null : t.exitStatus.code) : null,
+      active: t === active
+    };
+  });
+}
+
+async function handleBridge(context, payload) {
   if (!payload || typeof payload !== 'object') return;
   if (payload.op === 'set' && Array.isArray(payload.memos)) {
     saveMemos(context, sanitizeMemos(payload.memos));
@@ -1379,6 +1571,18 @@ function handleBridge(context, payload) {
         () => { /* ignore */ }
       );
     }
+  } else if (payload.op === 'listTerminals') {
+    return { terminals: listTerminalsData() };
+  } else if (payload.op === 'cleanupTerminals') {
+    // Dispose every terminal that is NOT actively executing a command (idle or
+    // already exited), then let the array settle before re-reading so the
+    // freshly recomputed indices match the live state.
+    vscode.window.terminals.forEach(t => { if (!busyTerminals.has(t)) { try { t.dispose(); } catch { /* ignore */ } } });
+    await new Promise(r => setTimeout(r, 80));
+    return { terminals: listTerminalsData() };
+  } else if (payload.op === 'showTerminal' && typeof payload.index === 'number') {
+    const t = vscode.window.terminals[payload.index];
+    if (t) { try { t.show(); } catch { /* ignore */ } }
   }
 }
 
@@ -1409,12 +1613,12 @@ function startBridge(context) {
       let body = '';
       req.on('data', (c) => { body += c; if (body.length > 1e6) req.destroy(); });
       req.on('end', () => {
-        try {
-          const result = handleBridge(context, JSON.parse(body || '{}'));
+        let parsed;
+        try { parsed = JSON.parse(body || '{}'); } catch { res.writeHead(400); res.end(); return; }
+        Promise.resolve(handleBridge(context, parsed)).then((result) => {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(result != null ? result : { ok: true }));
-        }
-        catch { res.writeHead(400); res.end(); }
+        }).catch(() => { res.writeHead(400); res.end(); });
       });
       return;
     }
@@ -1483,6 +1687,19 @@ function activate(context) {
   ensureMemos(context);
   startBridge(context);
   try { writeInjection(context); } catch { /* ignore */ }
+
+  // Track which terminals are actively running a command via shell integration,
+  // so the terminal viewer can tell "busy" apart from "idle at a prompt". These
+  // events exist on recent VS Code; guard so older hosts still load.
+  if (typeof vscode.window.onDidStartTerminalShellExecution === 'function') {
+    context.subscriptions.push(
+      vscode.window.onDidStartTerminalShellExecution(e => { if (e && e.terminal) busyTerminals.add(e.terminal); }),
+      vscode.window.onDidEndTerminalShellExecution(e => { if (e && e.terminal) busyTerminals.delete(e.terminal); })
+    );
+  }
+  context.subscriptions.push(
+    vscode.window.onDidCloseTerminal(t => busyTerminals.delete(t))
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('copilotExtension.restoreDefault', async () => {

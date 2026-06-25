@@ -1,5 +1,5 @@
 {
-  "_v": 1,
+  "_v": 2,
   "commands": [
     [
       {
@@ -20,6 +20,12 @@
         "label": "Memory",
         "icon": "book",
         "description": "查看 Copilot 记忆文件（用户/项目/会话）"
+      },
+      {
+        "text": "#tool:copilot-extension/terminals",
+        "label": "Terminals",
+        "icon": "terminal",
+        "description": "查看所有终端（含隐藏），一键清理已完成的终端"
       }
     ],
     [
