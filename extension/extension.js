@@ -249,6 +249,7 @@ function buildInjectionScript(buttons, memos, bridge) {
   var MEMORY_TOKEN = ${JSON.stringify(MEMORY_TOKEN)};
   var TERMINALS_TOKEN = ${JSON.stringify(TERMINALS_TOKEN)};
   var FOCUS_TOKEN = ${JSON.stringify(FOCUS_TOKEN)};
+  var BADGE_TOKENS = ${JSON.stringify([...badgeProviders.keys()])};
   var BRIDGE_PORT = ${bridgePortLit};
   var BRIDGE_TOKEN = ${bridgeTokenLit};
   var ROW_CLASS = 'cpx-button-row';
@@ -268,12 +269,12 @@ function buildInjectionScript(buttons, memos, bridge) {
       '.cpx-button-row>.chat-input-toolbar{width:auto;min-width:0;overflow:visible}' +
       '.cpx-button-row .action-label{cursor:pointer}' +
       '.cpx-button-row .action-label:hover{background-color:var(--vscode-toolbar-hoverBackground)}' +
-      // Top-right count bubble on the Terminals button (cleanable idle count).
+      // Generic top-right count bubble for any badge-enabled button (BADGE_TOKENS).
       // The action-bar chain clips overflow by default, so open it up along the
       // whole path or the bubble's protruding corner gets cut off.
       '.cpx-button-row .monaco-action-bar,.cpx-button-row .actions-container,.cpx-button-row .action-item{overflow:visible}' +
-      '.cpx-terminals-item{position:relative;overflow:visible}' +
-      '.cpx-term-badge{position:absolute;top:0;right:-7px;display:none;min-width:14px;height:14px;box-sizing:border-box;padding:0 4px;border-radius:8px;font-size:9px;line-height:14px;font-weight:600;text-align:center;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);pointer-events:none;z-index:5}' +
+      '.cpx-badge-item{position:relative;overflow:visible}' +
+      '.cpx-badge{position:absolute;top:0;right:-7px;display:none;min-width:14px;height:14px;box-sizing:border-box;padding:0 4px;border-radius:8px;font-size:9px;line-height:14px;font-weight:600;text-align:center;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);pointer-events:none;z-index:5}' +
       // Our hover isn't sized by VS Code's hover service, so the absolute
       // .monaco-hover would shrink-to-min (a tall narrow column). max-content
       // makes it hug the text and wrap at the reused .hover-contents max-width.
@@ -781,8 +782,8 @@ function buildInjectionScript(buttons, memos, bridge) {
       countLbl.textContent = '共 ' + list.length + ' 个终端，' + done + ' 个可清理';
       cleanBtn.style.opacity = done ? '1' : '.5';
       cleanBtn.style.pointerEvents = done ? 'auto' : 'none';
-      terminalBadgeCount = done;
-      try { updateTerminalBadge(); } catch (e) {}
+      badgeCounts[TERMINALS_TOKEN] = done;
+      try { updateBadges(); } catch (e) {}
       if (!list.length) {
         contentArea.appendChild(mkEl('div', 'padding:14px;color:var(--vscode-descriptionForeground)', '没有打开的终端。'));
         return;
@@ -840,10 +841,11 @@ function buildInjectionScript(buttons, memos, bridge) {
     });
   }
 
-  // Count of cleanable (idle/exited, i.e. not-busy) terminals, shown as a bubble
-  // on the Terminals button. Polled from the bridge and re-applied after every
-  // row rebuild (ensureRow may recreate the button with an empty badge).
-  var terminalBadgeCount = 0;
+  // Generic count bubble for any #tool:copilot-extension/* button whose token
+  // the host registered a badge provider for (BADGE_TOKENS). Per-token counts
+  // come from the badgeCounts bridge op and are re-applied after every row
+  // rebuild (ensureRow may recreate a button with an empty badge).
+  var badgeCounts = {};
 
   function cleanableCount(list) {
     var n = 0;
@@ -851,13 +853,14 @@ function buildInjectionScript(buttons, memos, bridge) {
     return n;
   }
 
-  function updateTerminalBadge() {
-    var items = document.querySelectorAll('.cpx-terminals-item');
+  function updateBadges() {
+    var items = document.querySelectorAll('.cpx-badge-item');
     for (var i = 0; i < items.length; i++) {
-      var badge = items[i].querySelector('.cpx-term-badge');
+      var badge = items[i].querySelector('.cpx-badge');
       if (!badge) continue;
-      if (terminalBadgeCount > 0) {
-        var txt = terminalBadgeCount > 99 ? '99+' : String(terminalBadgeCount);
+      var n = badgeCounts[items[i].dataset.cpxToken] || 0;
+      if (n > 0) {
+        var txt = n > 99 ? '99+' : String(n);
         if (badge.textContent !== txt) badge.textContent = txt;
         if (badge.style.display !== 'block') badge.style.display = 'block';
       } else if (badge.style.display !== 'none') {
@@ -866,14 +869,14 @@ function buildInjectionScript(buttons, memos, bridge) {
     }
   }
 
-  function pollTerminalBadge() {
-    // No button mounted (e.g. chat closed) means nothing to update — skip the
-    // bridge round-trip entirely rather than polling the host every few seconds.
-    if (!document.querySelector('.cpx-terminals-item')) return;
-    bridgeFetch({ op: 'listTerminals' }, function (data) {
-      if (!data || !data.terminals) return;
-      terminalBadgeCount = cleanableCount(data.terminals);
-      updateTerminalBadge();
+  function pollBadges() {
+    // No badge-bearing button mounted (e.g. chat closed) — skip the round-trip
+    // rather than polling the host every few seconds for nothing.
+    if (!BADGE_TOKENS.length || !document.querySelector('.cpx-badge-item')) return;
+    bridgeFetch({ op: 'badgeCounts' }, function (data) {
+      if (!data || !data.counts) return;
+      badgeCounts = data.counts;
+      updateBadges();
     });
   }
 
@@ -889,7 +892,8 @@ function buildInjectionScript(buttons, memos, bridge) {
   // Build one native action item (li > a) for a button.
   function buildButtonItem(b) {
     var li = document.createElement('li');
-    li.className = 'action-item chat-input-picker-item' + (b.text === FOCUS_TOKEN ? ' cpx-focus-item' : '') + (b.text === TERMINALS_TOKEN ? ' cpx-terminals-item' : '');
+    var hasBadge = BADGE_TOKENS.indexOf(b.text) !== -1;
+    li.className = 'action-item chat-input-picker-item' + (b.text === FOCUS_TOKEN ? ' cpx-focus-item' : '') + (hasBadge ? ' cpx-badge-item' : '');
     li.setAttribute('role', 'presentation');
     var a = document.createElement('a');
     a.className = 'action-label' + (b.iconOnly ? ' compact' : '');
@@ -918,9 +922,10 @@ function buildInjectionScript(buttons, memos, bridge) {
       submit(b.text, a, b.submit);
     });
     li.appendChild(a);
-    if (b.text === TERMINALS_TOKEN) {
+    if (hasBadge) {
+      li.dataset.cpxToken = b.text;
       var badge = document.createElement('span');
-      badge.className = 'cpx-term-badge';
+      badge.className = 'cpx-badge';
       li.appendChild(badge);
     }
     return li;
@@ -1194,7 +1199,7 @@ function buildInjectionScript(buttons, memos, bridge) {
       scheduled = false;
       try { ensureRow(); } catch (e) {}
       try { setFocusIcon(); } catch (e) {}
-      try { updateTerminalBadge(); } catch (e) {}
+      try { updateBadges(); } catch (e) {}
     });
   }
 
@@ -1211,13 +1216,13 @@ function buildInjectionScript(buttons, memos, bridge) {
       var done = false;
       try { done = ensureRow(); } catch (e) {}
       try { setFocusIcon(); } catch (e) {}
-      try { updateTerminalBadge(); } catch (e) {}
+      try { updateBadges(); } catch (e) {}
       if (done || ++ticks > 120) clearInterval(iv); // ~60s safety net
     }, 500);
     try { ensureRow(); } catch (e) {}
     try { setFocusIcon(); } catch (e) {}
-    try { pollTerminalBadge(); } catch (e) {}
-    setInterval(function () { try { pollTerminalBadge(); } catch (e) {} }, 3000);
+    try { pollBadges(); } catch (e) {}
+    setInterval(function () { try { pollBadges(); } catch (e) {} }, 3000);
   }
 
   if (document.readyState === 'loading') {
@@ -1541,6 +1546,19 @@ function listTerminalsData() {
   });
 }
 
+/**
+ * Count-bubble providers keyed by button token. Registering one is the whole
+ * "interface": the matching #tool:copilot-extension/* button then auto-shows a
+ * bubble — the injected script reads the token list (BADGE_TOKENS) to render the
+ * badge element and polls the badgeCounts bridge op for the live numbers.
+ * @type {Map<string, (context: vscode.ExtensionContext) => number>}
+ */
+const badgeProviders = new Map();
+function registerBadgeProvider(token, getCount) { badgeProviders.set(token, getCount); }
+
+// Terminals bubble: how many terminals are cleanable (not actively running).
+registerBadgeProvider(TERMINALS_TOKEN, () => listTerminalsData().filter(t => t.state !== 'busy').length);
+
 async function handleBridge(context, payload) {
   if (!payload || typeof payload !== 'object') return;
   if (payload.op === 'set' && Array.isArray(payload.memos)) {
@@ -1573,6 +1591,12 @@ async function handleBridge(context, payload) {
     }
   } else if (payload.op === 'listTerminals') {
     return { terminals: listTerminalsData() };
+  } else if (payload.op === 'badgeCounts') {
+    const counts = {};
+    for (const [token, getCount] of badgeProviders) {
+      try { counts[token] = getCount(context) | 0; } catch { counts[token] = 0; }
+    }
+    return { counts };
   } else if (payload.op === 'cleanupTerminals') {
     // Dispose every terminal that is NOT actively executing a command (idle or
     // already exited), then let the array settle before re-reading so the
