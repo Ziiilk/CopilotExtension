@@ -3,8 +3,11 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * @typedef {{ text: string, label: string, icon: string, submit: string, description: string, newRow: boolean }} MacroButton
+ * @typedef {{ text: string, label: string, icon: string, submit: string, description: string, iconOnly: boolean, newRow: boolean }} MacroButton
  */
+
+/** Shared sentinel prefix for built-in tool buttons (#tool:copilot-extension/<command>). */
+const TOKEN_PREFIX = '#tool:copilot-extension/';
 
 /**
  * Absolute path to the JSON config that defines the command buttons. Stored in
@@ -18,88 +21,75 @@ function configPath(context) {
 }
 
 /**
- * The default config seeded into globalStorage when none exists yet. Read from
- * the `commands.json` bundled inside the extension (so the defaults are shipped
- * with the extension, not hard-coded here). Falls back to an empty list.
- * @param {vscode.ExtensionContext} context
- * @returns {{ commands: object[] }}
+ * Parse a commands config file, returning its object or null when missing/invalid.
+ * @param {string} file
+ * @returns {{ rows?: object[] } | null}
  */
-function defaultConfig(context) {
-  try {
-    const data = JSON.parse(fs.readFileSync(path.join(context.extensionPath, 'commands.json'), 'utf8'));
-    if (data && Array.isArray(data.commands)) return data;
-  } catch { /* missing or invalid — fall back to empty */ }
-  return { commands: [] };
+function readConfigFile(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch { return null; }
 }
 
 /**
- * Ensure the config file exists, seeding it with the bundled defaults on first run.
+ * Path to the default config shipped inside the extension.
  * @param {vscode.ExtensionContext} context
- * @returns {string} the config path
+ * @returns {string}
  */
-function ensureConfig(context) {
-  const p = configPath(context);
-  try { fs.mkdirSync(path.dirname(p), { recursive: true }); } catch { /* unwritable */ }
-  // Seed on first run. When the bundled config has a newer _v than the stored
-  // copy, re-seed so extension updates bring new buttons without wiping user
-  // edits on every activation. Version is tracked in globalState (not in the
-  // user-editable JSON) so _v doesn't leak into the config file.
-  const def = defaultConfig(context);
-  const latestV = def._v || 0;
-  // Strip _v before writing — it's internal, not user-facing config.
-  const seed = JSON.stringify(def, (k, v) => k === '_v' ? undefined : v, 2) + '\n';
-  let cur = null;
-  try { cur = fs.readFileSync(p, 'utf8'); } catch { /* missing */ }
-  if (!cur) { fs.writeFileSync(p, seed, 'utf8'); context.globalState.update('configVersion', latestV); return p; }
-  const curV = context.globalState.get('configVersion', 0);
-  if (latestV > curV) { fs.writeFileSync(p, seed, 'utf8'); context.globalState.update('configVersion', latestV); }
-  return p;
+function bundledConfigPath(context) {
+  return path.join(context.extensionPath, 'commands.json');
 }
 
 /**
- * Read the command buttons from the JSON config. Accepts either a top-level
- * array or an object with a `commands` array. Invalid entries are skipped.
+ * Normalize one raw config button into the internal MacroButton shape.
+ *   { label, icon, showLabel, tooltip, action }
+ *     action = { type: 'builtin', command }      -> a #tool:copilot-extension/<command> sentinel
+ *            | { type: 'prompt',  value, submit } -> text inserted into chat (submit => auto-send)
+ * @param {any} c raw button
+ * @param {boolean} breakLine whether this button starts a new toolbar line
+ * @returns {MacroButton|null}
+ */
+function normalizeButton(c, breakLine) {
+  if (!c || typeof c !== 'object' || !c.action || typeof c.action !== 'object') return null;
+  const action = c.action;
+  let text = '';
+  let submit = 'send';
+  if (action.type === 'builtin' && typeof action.command === 'string' && action.command.trim()) {
+    text = TOKEN_PREFIX + action.command.trim();
+  } else if (action.type === 'prompt' && typeof action.value === 'string') {
+    text = action.value;
+    submit = action.submit === true ? 'send' : 'type';
+  }
+  if (!text.trim()) return null;
+  return {
+    text,
+    label: (typeof c.label === 'string' && c.label) ? c.label : text.trim().slice(0, 24),
+    icon: typeof c.icon === 'string' ? c.icon.replace(/[^a-z0-9-]/gi, '') : '',
+    submit,
+    description: typeof c.tooltip === 'string' ? c.tooltip : '',
+    iconOnly: c.showLabel === false,
+    newRow: !!breakLine
+  };
+}
+
+/**
+ * Read the command buttons. The user-level override (globalStorage) wins when
+ * present; otherwise the bundled default ships the buttons. Schema:
+ * `{ rows: [{ buttons: [<Button>] }] }`. Invalid entries are skipped.
  * @param {vscode.ExtensionContext} context
- * @returns {CommandButton[]}
+ * @returns {MacroButton[]}
  */
 function loadButtons(context) {
-  let raw;
-  try {
-    raw = fs.readFileSync(configPath(context), 'utf8');
-  } catch {
-    return [];
-  }
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  const list = Array.isArray(data) ? data : Array.isArray(data && data.commands) ? data.commands : [];
+  const data = readConfigFile(configPath(context)) || readConfigFile(bundledConfigPath(context));
+  if (!data || !Array.isArray(data.rows)) return [];
   /** @type {Map<string, MacroButton>} */
   const byKey = new Map();
-  // `commands` may be a flat list of buttons, or a list of rows (each row an
-  // array of buttons). Nested arrays define the layout: every row after the
-  // first starts on a new line. A flat list still honors per-button newRow.
-  list.forEach((group, rowIdx) => {
-    const isRow = Array.isArray(group);
-    const buttons = isRow ? group : [group];
+  // Each row is { buttons: [...] } (a bare array is also accepted). Every button
+  // after the first row's start opens a fresh toolbar line.
+  data.rows.forEach((row, rowIdx) => {
+    const buttons = Array.isArray(row) ? row : (Array.isArray(row && row.buttons) ? row.buttons : []);
     buttons.forEach((c, btnIdx) => {
-      if (!c) return;
-      // A macro is just the text to insert; a slash command is text starting '/'.
-      const text = typeof c.text === 'string' ? c.text : '';
-      if (!text.trim() || byKey.has(text)) return;
-      byKey.set(text, {
-        text,
-        label: typeof c.label === 'string' && c.label ? c.label : text.trim().slice(0, 24),
-        icon: typeof c.icon === 'string' ? c.icon.replace(/[^a-z0-9-]/gi, '') : '',
-        submit: String(c.submit || 'send').toLowerCase() === 'type' ? 'type' : 'send',
-        description: typeof c.description === 'string' ? c.description : '',
-        iconOnly: !!c.iconOnly,
-        // A nested row breaks the line at its first button (except the first row);
-        // a flat entry honors its explicit newRow/break flag.
-        newRow: isRow ? (btnIdx === 0 && rowIdx > 0) : !!(c.newRow || c.break)
-      });
+      const norm = normalizeButton(c, rowIdx > 0 && btnIdx === 0);
+      if (norm && !byKey.has(norm.text)) byKey.set(norm.text, norm);
     });
   });
   return [...byKey.values()];
@@ -1363,12 +1353,18 @@ async function enableInjection(context) {
 }
 
 /**
- * Open the JSON command config in an editor, seeding defaults if missing.
+ * Open the user-level command config for editing, creating it from the bundled
+ * default on first use so there's something to edit. Once the override exists it
+ * takes priority over the bundled default (loadButtons reads it first).
  * @param {vscode.ExtensionContext} context
  */
 async function editConfig(context) {
-  const p = ensureConfig(context);
+  const p = configPath(context);
   try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    // Seed the override from the bundled default only when absent — EXCL makes
+    // the copy fail (and we ignore it) if it already exists, so no pre-check.
+    try { fs.copyFileSync(bundledConfigPath(context), p, fs.constants.COPYFILE_EXCL); } catch { /* already exists */ }
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(p));
     await vscode.window.showTextDocument(doc);
   } catch (e) {
@@ -1376,17 +1372,17 @@ async function editConfig(context) {
   }
 }
 
-/** Special macro token (a commands.json `text`) that opens the memo manager. */
-const MEMO_TOKEN = '#tool:copilot-extension/memo';
+/** Special macro token (normalized button text) that opens the memo manager. */
+const MEMO_TOKEN = TOKEN_PREFIX + 'memo';
 
 /** Special macro token that opens the memory viewer. */
-const MEMORY_TOKEN = '#tool:copilot-extension/memory';
+const MEMORY_TOKEN = TOKEN_PREFIX + 'memory';
 
 /** Special macro token that opens the terminal viewer. */
-const TERMINALS_TOKEN = '#tool:copilot-extension/terminals';
+const TERMINALS_TOKEN = TOKEN_PREFIX + 'terminals';
 
 /** Special macro token that toggles chat-focus (spread / restore). */
-const FOCUS_TOKEN = '#tool:copilot-extension/focus';
+const FOCUS_TOKEN = TOKEN_PREFIX + 'focus';
 
 /**
  * @typedef {{ label: string, text: string }} Memo
@@ -1704,10 +1700,18 @@ function activate(context) {
     vscode.window.registerWebviewViewProvider('copilotExtension.panel', provider)
   );
 
-  // Install the bundled prompt files, then seed the JSON config on first run and
-  // keep the injection script current.
+  // Install the bundled prompt files and keep the injection script current. The
+  // bundled commands.json drives the buttons directly; a user override is only
+  // created on demand via "编辑配置".
   installPrompts(context);
-  ensureConfig(context);
+  // One-time cleanup: older versions auto-seeded a globalStorage copy of the
+  // config that would now shadow the bundled default. Move it aside once (rename,
+  // not delete, so any hand-edits stay recoverable) so the bundled config drives
+  // by default; users opt into a fresh override via "编辑配置".
+  if (!context.globalState.get('cpxConfigMigrated')) {
+    try { fs.renameSync(configPath(context), configPath(context) + '.bak'); } catch { /* nothing to move */ }
+    context.globalState.update('cpxConfigMigrated', true);
+  }
   ensureMemos(context);
   startBridge(context);
   try { writeInjection(context); } catch { /* ignore */ }

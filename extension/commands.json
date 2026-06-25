@@ -1,62 +1,61 @@
 {
-  "_v": 2,
-  "commands": [
-    [
-      {
-        "text": "#tool:copilot-extension/focus",
-        "label": "专注",
-        "icon": "layout-centered",
-        "iconOnly": true,
-        "description": "聊天专注（铺满/还原）"
-      },
-      {
-        "text": "#tool:copilot-extension/memo",
-        "label": "Memo",
-        "icon": "note",
-        "description": "打开备忘录"
-      },
-      {
-        "text": "#tool:copilot-extension/memory",
-        "label": "Memory",
-        "icon": "book",
-        "description": "查看 Copilot 记忆文件（用户/项目/会话）"
-      },
-      {
-        "text": "#tool:copilot-extension/terminals",
-        "label": "Terminals",
-        "icon": "terminal",
-        "description": "查看所有终端（含隐藏），一键清理已完成的终端"
-      }
-    ],
-    [
-      {
-        "text": "/simplify",
-        "label": "Simplify",
-        "icon": "sparkle",
-        "submit": "send",
-        "description": "审查变更代码的复用性、质量与效率，并修复发现的问题。"
-      },
-      {
-        "text": "/bump",
-        "label": "Bump Version",
-        "icon": "versions",
-        "submit": "send",
-        "description": "探测当前仓库的版本管理方式并升级版本号（可选 major / minor / patch）。"
-      },
-      {
-        "text": "/commit",
-        "label": "Commit",
-        "icon": "git-commit",
-        "submit": "send",
-        "description": "依据本地实际 diff 生成符合 Conventional Commits 规范的提交。"
-      },
-      {
-        "text": "/addtag",
-        "label": "Add Tag",
-        "icon": "tag",
-        "submit": "send",
-        "description": "为当前版本号在本地创建对应的 git tag。"
-      }
-    ]
+  "rows": [
+    {
+      "buttons": [
+        {
+          "label": "专注",
+          "icon": "layout-centered",
+          "showLabel": false,
+          "tooltip": "聊天专注（铺满/还原）",
+          "action": { "type": "builtin", "command": "focus" }
+        },
+        {
+          "label": "Memo",
+          "icon": "note",
+          "tooltip": "打开备忘录",
+          "action": { "type": "builtin", "command": "memo" }
+        },
+        {
+          "label": "Memory",
+          "icon": "book",
+          "tooltip": "查看 Copilot 记忆文件（用户/项目/会话）",
+          "action": { "type": "builtin", "command": "memory" }
+        },
+        {
+          "label": "Terminals",
+          "icon": "terminal",
+          "tooltip": "查看所有终端（含隐藏），一键清理已完成的终端",
+          "action": { "type": "builtin", "command": "terminals" }
+        }
+      ]
+    },
+    {
+      "buttons": [
+        {
+          "label": "Simplify",
+          "icon": "sparkle",
+          "tooltip": "审查变更代码的复用性、质量与效率，并修复发现的问题。",
+          "action": { "type": "prompt", "value": "/simplify", "submit": true }
+        },
+        {
+          "label": "Bump Version",
+          "icon": "versions",
+          "tooltip": "探测当前仓库的版本管理方式并升级版本号（可选 major / minor / patch）。",
+          "action": { "type": "prompt", "value": "/bump", "submit": true }
+        },
+        {
+          "label": "Commit",
+          "icon": "git-commit",
+          "tooltip": "依据本地实际 diff 生成符合 Conventional Commits 规范的提交。",
+          "action": { "type": "prompt", "value": "/commit", "submit": true }
+        },
+        {
+          "label": "Add Tag",
+          "icon": "tag",
+          "tooltip": "为当前版本号在本地创建对应的 git tag。",
+          "action": { "type": "prompt", "value": "/addtag", "submit": true }
+        }
+      ]
+    }
   ]
 }

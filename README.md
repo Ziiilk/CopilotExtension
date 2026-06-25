@@ -96,48 +96,64 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 #### 命令配置（`commands.json`）
 
 按钮列表由一个独立的 JSON 配置文件定义（不再扫描 prompt.md frontmatter）。
-每个按钮是一个**宏**：`text` 就是点击时插入 Chat 的文本——以 `/` 开头即为 slash
-命令（如 `/commit`），否则就是一段直接发给 Copilot 的 prompt。文件存于扩展的 globalStorage：
+每个按钮由 `label`/`icon` 等显示字段，加一个语义化的 `action` 行为字段定义。
+`action` 按 `type` 判别：`prompt` 表示把一段文本 / slash 命令填入 Chat（可选自动
+发送），`builtin` 表示调用扩展内建工具（专注 / 备忘录 / 记忆 / 终端等）。
 
-- Windows `%APPDATA%\Code\User\globalStorage\local.copilot-extension-panel\commands.json`
+按钮默认随扩展打包（[`extension/commands.json`](extension/commands.json)）并**直接生效**——改默认值就改它后重新安装扩展即可（扩展代码本身不硬编码任何命令）。
+点面板「编辑配置」会在 globalStorage 生成一份**用户副本**供你修改；该副本一旦存在就**优先于**打包默认被读取（用户自定义覆盖默认）。改完点「应用配置」生效。
 
-默认配置随扩展打包（[`extension/commands.json`](extension/commands.json)）：首次运行扩展时，若 globalStorage 里还没有
-`commands.json`，扩展会用这份打包的默认值种子它（扩展代码本身不硬编码任何命令）。
-点面板「编辑配置」可直接在 VS Code 中打开 globalStorage 里的副本，改完点「应用配置」生效。
-想改默认值（影响全新安装）就改 `extension/commands.json` 后重新安装扩展。
+- 用户副本路径（Windows）`%APPDATA%\Code\User\globalStorage\local.copilot-extension-panel\commands.json`（删掉它即回退到打包默认）
 
-格式为 `{ "commands": [...] }`（也兼容顶层数组），按钮顺序即列表顺序：
+格式为 `{ "rows": [{ "buttons": [...] }] }`，`rows` 显式分行，按钮顺序即显示顺序：
 
 ```jsonc
 {
-  "commands": [
+  "rows": [
     {
-      "text": "/commit",     // 以 / 开头 → 执行 slash 命令 /commit（对应 commit.prompt.md）
-      "label": "Commit",
-      "icon": "git-commit",   // codicon 名（见 https://microsoft.github.io/vscode-codicons），默认无图标
-      "submit": "send",        // send（默认）= 填充并自动发送；type = 仅填充输入框待用户补充
-      "description": "..."     // 鼠标悬停 tooltip 文案
-    },
-    {
-      "text": "解释最近改动的代码并指出潜在问题。",  // 不以 / 开头 → 作为 prompt 文本直接发送
-      "label": "解释改动",
-      "icon": "comment-discussion",
-      "submit": "send"
+      "buttons": [
+        {
+          "label": "Commit",
+          "icon": "git-commit",                 // codicon 名（见 https://microsoft.github.io/vscode-codicons），默认无图标
+          "tooltip": "...",                      // 鼠标悬停 tooltip 文案
+          // value 以 / 开头 → slash 命令（对应 commit.prompt.md）；submit:true=自动发送，false=仅填充待编辑
+          "action": { "type": "prompt", "value": "/commit", "submit": true }
+        },
+        {
+          "label": "Terminals",
+          "icon": "terminal",
+          "showLabel": true,                    // false = 仅显示图标，隐藏文字
+          "tooltip": "...",
+          // command 调用扩展内建工具：focus | memo | memory | terminals
+          "action": { "type": "builtin", "command": "terminals" }
+        }
+      ]
     }
   ]
 }
 ```
 
+按钮字段：
+
 | 字段 | 含义 | 默认 |
 |---|---|---|
-| `text` | 点击插入 Chat 的文本；`/xxx` = slash 命令，否则 = prompt（必填） | — |
-| `label` | 按钮显示文字 | `text` 前若干字 |
+| `label` | 按钮显示文字 | `value` 前若干字 |
 | `icon` | codicon 图标名 | 无 |
-| `submit` | `send` 自动发送 / `type` 仅填充待编辑 | `send` |
-| `description` | 悬停 tooltip 文案 | 取 `text` |
+| `showLabel` | 是否显示文字（`false` = 仅图标） | `true` |
+| `tooltip` | 悬停 tooltip 文案 | 无 |
+| `action` | 点击行为（见下，必填） | — |
 
-- 按钮顺序 = `commands` 数组中的顺序，调整顺序直接拖动条目即可。
-- `/xxx` 形式需对应一个真实存在的 prompt（如 `commit.prompt.md`），这样 slash 命令才有效。
+`action` 字段：
+
+| 字段 | 含义 | 默认 |
+|---|---|---|
+| `type` | `prompt` = 填入文本 / `builtin` = 内建工具 | — |
+| `value` | （`prompt`）填入 Chat 的文本；`/xxx` = slash 命令 | — |
+| `submit` | （`prompt`）`true` = 自动发送 / `false` = 仅填充待编辑 | `false` |
+| `command` | （`builtin`）内建命令：`focus` / `memo` / `memory` / `terminals` | — |
+
+- 按钮顺序 = `rows` 内 `buttons` 数组中的顺序，调整顺序直接拖动条目即可。
+- `prompt` 的 `value` 若为 `/xxx`，需对应一个真实存在的 prompt（如 `commit.prompt.md`），slash 命令才有效。
 - 改完 `commands.json` 后点面板「应用配置」即可把变更应用到 Chat 输入框上方。
 
 ## License
