@@ -376,37 +376,41 @@ function buildInjectionScript(buttons, memos, bridge) {
   }
 
   // Pick the bridge endpoint that belongs to THIS window from a list, by
-  // matching the workspace name against the window title (longest match wins);
-  // falls back to the sole endpoint when only one window is active.
+  // matching the workspace name against the window title (longest match wins).
+  // With several windows we must NOT blindly grab the sole/first endpoint —
+  // that's how requests leaked to another project's window — so when no name
+  // matches the title we only trust a lone endpoint (the single-window case)
+  // and otherwise refuse (null) rather than guess.
   function cpxPick(list) {
+    if (!list || !list.length) return null;
     var title = document.title || '';
     var best = null;
     for (var i = 0; i < list.length; i++) {
       var e = list[i];
       if (e && e.name && title.indexOf(e.name) !== -1 && (!best || String(e.name).length > String(best.name).length)) best = e;
     }
-    if (!best && list.length === 1) best = list[0];
-    return best;
+    if (best) return best;
+    return list.length === 1 ? list[0] : null;
   }
 
-  // Resolve this window's live endpoint once, then cache it: the directory
-  // service returns every window's CURRENT port, so we only need it on the
-  // first call (or after a failure, when the cache is cleared and we re-ask).
-  var __cpxEp = null;
+  // Resolve this window's live endpoint, caching the pick for a short window so
+  // the recurring badge poll doesn't hit the directory service every tick. The
+  // TTL is deliberately tiny: a stale or wrong pick (e.g. resolved before this
+  // window's own bridge registered) self-corrects within seconds — unlike the
+  // old indefinite cache that kept routing to another project's window forever.
+  var __cpxEp = null, __cpxEpTs = 0, CPX_EP_TTL = 4000;
   function cpxResolve(cb) {
-    if (__cpxEp) { cb(__cpxEp); return; }
+    if (__cpxEp && (Date.now() - __cpxEpTs) < CPX_EP_TTL) { cb(__cpxEp); return; }
     if (CPX_DIR_PORT) {
       fetch('http://127.0.0.1:' + CPX_DIR_PORT + '/registry?token=' + encodeURIComponent(CPX_TOKEN))
         .then(function (r) { return r.json(); })
-        .then(function (list) { var ep = cpxPick(Array.isArray(list) && list.length ? list : BRIDGE_ENDPOINTS); if (ep) __cpxEp = ep; cb(ep); })
+        .then(function (list) { var ep = cpxPick(Array.isArray(list) && list.length ? list : BRIDGE_ENDPOINTS); __cpxEp = ep; __cpxEpTs = Date.now(); cb(ep); })
         .catch(function () { cb(cpxPick(BRIDGE_ENDPOINTS)); });
     } else { cb(cpxPick(BRIDGE_ENDPOINTS)); }
   }
 
   // POST a payload to this window's loopback bridge. When cb is given, the JSON
   // response is parsed and passed to it (null on failure); else fire-and-forget.
-  // A failed POST clears the cached endpoint so the next call re-resolves (the
-  // window's port changes when its extension host reloads).
   function bridgeRequest(payload, cb) {
     cpxResolve(function (ep) {
       if (!ep || !ep.port) { if (cb) cb(null); return; }
@@ -416,9 +420,8 @@ function buildInjectionScript(buttons, memos, bridge) {
           headers: { 'Content-Type': 'text/plain' },
           body: JSON.stringify(payload)
         });
-        if (cb) p.then(function (r) { return r.json(); }).then(cb).catch(function () { __cpxEp = null; cb(null); });
-        else p.catch(function () { __cpxEp = null; });
-      } catch (e) { __cpxEp = null; if (cb) cb(null); }
+        if (cb) p.then(function (r) { return r.json(); }).then(cb).catch(function () { cb(null); });
+      } catch (e) { if (cb) cb(null); }
     });
   }
 
@@ -434,9 +437,10 @@ function buildInjectionScript(buttons, memos, bridge) {
 
   // Apply the given VS Code hover-background var on enter, clear on leave
   // (reused by the title actions, the search clear button and the list rows).
-  function hoverBg(el, varName) {
-    el.addEventListener('mouseenter', function () { el.style.background = 'var(' + varName + ')'; });
-    el.addEventListener('mouseleave', function () { el.style.background = 'transparent'; });
+  // An optional foreground var is swapped in tandem for menu-style selections.
+  function hoverBg(el, varName, fgVar) {
+    el.addEventListener('mouseenter', function () { el.style.background = 'var(' + varName + ')'; if (fgVar) el.style.color = 'var(' + fgVar + ')'; });
+    el.addEventListener('mouseleave', function () { el.style.background = 'transparent'; if (fgVar) el.style.color = ''; });
   }
 
   // Reuse VS Code's own button classes verbatim: .monaco-button gives the
@@ -865,6 +869,34 @@ function buildInjectionScript(buttons, memos, bridge) {
     });
   }
 
+  // ---- Terminals split-button behavior -------------------------------------
+  // Primary click cleans idle terminals by default; the caret menu exposes a
+  // persistent "only open the viewer" toggle that switches the primary click to
+  // open the terminal viewer instead. The preference lives in localStorage so
+  // it survives reloads (the injected script has no host storage of its own).
+  var TERMINALS_PREF_KEY = 'cpx.terminals.openViewerOnly';
+
+  function terminalsViewerOnly() {
+    try { return localStorage.getItem(TERMINALS_PREF_KEY) === '1'; } catch (e) { return false; }
+  }
+  function setTerminalsViewerOnly(v) {
+    try { localStorage.setItem(TERMINALS_PREF_KEY, v ? '1' : '0'); } catch (e) {}
+  }
+
+  function cleanupTerminalsNow() {
+    bridgeFetch({ op: 'cleanupTerminals' }, function (data) {
+      if (data && data.terminals) {
+        badgeCounts[TERMINALS_TOKEN] = cleanableCount(data.terminals);
+        try { updateBadges(); } catch (e) {}
+      }
+    });
+  }
+
+  function triggerTerminalsPrimary() {
+    if (terminalsViewerOnly()) triggerTerminals();
+    else cleanupTerminalsNow();
+  }
+
   // Generic count bubble for any #tool:copilot-extension/* button whose token
   // the host registered a badge provider for (BADGE_TOKENS). Per-token counts
   // come from the badgeCounts bridge op and are re-applied after every row
@@ -913,10 +945,124 @@ function buildInjectionScript(buttons, memos, bridge) {
   //   .chat-input-toolbars > .chat-input-toolbar > .monaco-action-bar
   //     > ul.actions-container > li.action-item.chat-input-picker-item
   //       > a.action-label > span.codicon.codicon-<x> + span.chat-input-picker-label
+  // ---- Generic split-button dropdown ---------------------------------------
+  // A reusable caret menu for toolbar buttons: a button keeps its primary click
+  // action while a small chevron opens a themed popup of extra options
+  // (checkable toggles or one-off actions). Styling reuses the workbench menu
+  // variables so it matches native context menus. Only one menu is open at a
+  // time; an outside click or Esc dismisses it. To make a button a split
+  // button, return a descriptor from splitButtonSpec.
+  var dropdownRoot = null;
+
+  function closeDropdown() {
+    if (dropdownRoot && dropdownRoot.parentNode) dropdownRoot.parentNode.removeChild(dropdownRoot);
+    dropdownRoot = null;
+    document.removeEventListener('mousedown', onDropdownDocDown, true);
+    document.removeEventListener('keydown', onDropdownDocKey, true);
+  }
+
+  function onDropdownDocDown(e) {
+    if (dropdownRoot && !dropdownRoot.contains(e.target)) closeDropdown();
+  }
+  function onDropdownDocKey(e) {
+    if (e.key === 'Escape') closeDropdown();
+  }
+
+  // Build the popup body from an item list. Each item is either
+  //   { type:'checkbox', label, checked():bool, onToggle(next) }  or
+  //   { type:'action',   label, icon?, onClick() }
+  function buildDropdownMenu(items) {
+    var menu = mkEl('div', 'position:fixed;z-index:2600;min-width:200px;padding:4px;border-radius:5px;background:var(--vscode-menu-background, var(--vscode-editorWidget-background));color:var(--vscode-menu-foreground, var(--vscode-foreground));border:1px solid var(--vscode-menu-border, var(--vscode-widget-border, transparent));box-shadow:0 2px 8px var(--vscode-widget-shadow, rgba(0,0,0,.36));font-family:var(--vscode-font-family);font-size:13px');
+    menu.className = 'cpx-dropdown-menu';
+    items.forEach(function (it) {
+      var row = mkEl('div', 'display:flex;align-items:center;gap:8px;padding:4px 10px;border-radius:4px;cursor:pointer;white-space:nowrap');
+      var mark = mkEl('span', 'flex:0 0 auto;width:16px;text-align:center;font-size:14px');
+      if (it.type === 'checkbox') {
+        mark.className = 'codicon codicon-check';
+        mark.style.visibility = it.checked() ? 'visible' : 'hidden';
+      } else if (it.icon) {
+        mark.className = 'codicon codicon-' + it.icon;
+      }
+      var lbl = mkEl('span', 'flex:1 1 auto', it.label);
+      row.appendChild(mark);
+      row.appendChild(lbl);
+      hoverBg(row, '--vscode-menu-selectionBackground', '--vscode-menu-selectionForeground');
+      row.addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (it.type === 'checkbox') {
+          var nv = !it.checked();
+          if (it.onToggle) it.onToggle(nv);
+          mark.style.visibility = nv ? 'visible' : 'hidden';
+        } else if (it.onClick) {
+          it.onClick();
+        }
+        closeDropdown();
+      });
+      menu.appendChild(row);
+    });
+    return menu;
+  }
+
+  function openDropdown(anchorEl, items) {
+    if (dropdownRoot) { closeDropdown(); return; }
+    var menu = buildDropdownMenu(items);
+    (document.querySelector('.monaco-workbench') || document.body).appendChild(menu);
+    dropdownRoot = menu;
+    var r = anchorEl.getBoundingClientRect();
+    var mr = menu.getBoundingClientRect();
+    // The chat toolbar sits near the bottom, so prefer opening upward; flip
+    // below when there isn't room above. Left edges align with the button.
+    var top = r.top - mr.height - 4;
+    if (top < 4) top = r.bottom + 4;
+    var left = Math.min(r.left, window.innerWidth - mr.width - 4);
+    menu.style.top = Math.round(Math.max(4, top)) + 'px';
+    menu.style.left = Math.round(Math.max(4, left)) + 'px';
+    // The opening click's mousedown already fired before this click handler, so
+    // attaching synchronously won't immediately self-close the freshly opened
+    // menu (and avoids a timer that could leak listeners on rapid re-open).
+    document.addEventListener('mousedown', onDropdownDocDown, true);
+    document.addEventListener('keydown', onDropdownDocKey, true);
+  }
+
+  // Append a chevron to a button anchor that opens the given menu. Clicking the
+  // chevron stops the click from reaching the anchor's primary action.
+  function attachCaret(anchor, getItems) {
+    var caret = mkEl('span', 'margin-left:2px;opacity:.85;cursor:pointer');
+    caret.className = 'codicon codicon-chevron-down cpx-caret';
+    caret.title = '更多选项';
+    caret.addEventListener('click', function (e) {
+      e.stopPropagation();
+      e.preventDefault();
+      hideHover();
+      openDropdown(anchor, getItems());
+    });
+    anchor.appendChild(caret);
+  }
+
+  // Split-button descriptor { primary: fn(anchor), items: fn(): MenuItem[] }.
+  // Only the Terminals builtin opts in today; new split buttons add a case.
+  function splitButtonSpec(b) {
+    if (b.text === TERMINALS_TOKEN) {
+      return {
+        primary: triggerTerminalsPrimary,
+        items: function () {
+          return [{
+            type: 'checkbox',
+            label: '仅打开终端查看器',
+            checked: terminalsViewerOnly,
+            onToggle: setTerminalsViewerOnly
+          }];
+        }
+      };
+    }
+    return null;
+  }
+
   // Build one native action item (li > a) for a button.
   function buildButtonItem(b) {
     var li = document.createElement('li');
     var hasBadge = BADGE_TOKENS.indexOf(b.text) !== -1;
+    var split = splitButtonSpec(b);
     li.className = 'action-item chat-input-picker-item' + (b.text === FOCUS_TOKEN ? ' cpx-focus-item' : '') + (hasBadge ? ' cpx-badge-item' : '');
     li.setAttribute('role', 'presentation');
     var a = document.createElement('a');
@@ -936,12 +1082,13 @@ function buildInjectionScript(buttons, memos, bridge) {
       lbl.textContent = b.label;
       a.appendChild(lbl);
     }
+    if (split) attachCaret(a, split.items);
     attachHover(a, tip);
     a.addEventListener('click', function () {
       hideHover();
+      if (split) { split.primary(a); return; }
       if (b.text === MEMO_TOKEN) { triggerMemo(a); return; }
       if (b.text === MEMORY_TOKEN) { triggerMemory(); return; }
-      if (b.text === TERMINALS_TOKEN) { triggerTerminals(); return; }
       if (b.text === FOCUS_TOKEN) { toggleChatFocus(); return; }
       submit(b.text, a, b.submit);
     });

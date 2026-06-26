@@ -24,7 +24,7 @@
         {
           "label": "Terminals",
           "icon": "terminal",
-          "tooltip": "查看所有终端（含隐藏），一键清理已完成的终端",
+          "tooltip": "点击清理空闲终端；下拉可勾选「仅打开终端查看器」",
           "action": { "type": "builtin", "command": "terminals" }
         }
       ]
