@@ -10,6 +10,13 @@
           "action": { "type": "builtin", "command": "focus" }
         },
         {
+          "label": "查找",
+          "icon": "search",
+          "showLabel": false,
+          "tooltip": "在当前会话中查找对话文本",
+          "action": { "type": "builtin", "command": "find" }
+        },
+        {
           "label": "Memo",
           "icon": "note",
           "tooltip": "打开备忘录",

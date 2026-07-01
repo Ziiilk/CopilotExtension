@@ -98,7 +98,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 按钮列表由一个独立的 JSON 配置文件定义（不再扫描 prompt.md frontmatter）。
 每个按钮由 `label`/`icon` 等显示字段，加一个语义化的 `action` 行为字段定义。
 `action` 按 `type` 判别：`prompt` 表示把一段文本 / slash 命令填入 Chat（可选自动
-发送），`builtin` 表示调用扩展内建工具（专注 / 备忘录 / 记忆 / 终端等）。
+发送），`builtin` 表示调用扩展内建工具（专注 / 查找 / 备忘录 / 记忆 / 终端等）。
 
 按钮默认随扩展打包（[`extension/commands.json`](extension/commands.json)）并**直接生效**——改默认值就改它后重新安装扩展即可（扩展代码本身不硬编码任何命令）。
 点面板「编辑配置」会在 globalStorage 生成一份**用户副本**供你修改；该副本一旦存在就**优先于**打包默认被读取（用户自定义覆盖默认）。改完点「应用配置」生效。
@@ -124,7 +124,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
           "icon": "terminal",
           "showLabel": true,                    // false = 仅显示图标，隐藏文字
           "tooltip": "...",
-          // command 调用扩展内建工具：focus | memo | memory | terminals
+          // command 调用扩展内建工具：focus | find | memo | memory | terminals
           "action": { "type": "builtin", "command": "terminals" }
         }
       ]
@@ -150,7 +150,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 | `type` | `prompt` = 填入文本 / `builtin` = 内建工具 | — |
 | `value` | （`prompt`）填入 Chat 的文本；`/xxx` = slash 命令 | — |
 | `submit` | （`prompt`）`true` = 自动发送 / `false` = 仅填充待编辑 | `false` |
-| `command` | （`builtin`）内建命令：`focus` / `memo` / `memory` / `terminals` | — |
+| `command` | （`builtin`）内建命令：`focus` / `find` / `memo` / `memory` / `terminals` | — |
 
 - 按钮顺序 = `rows` 内 `buttons` 数组中的顺序，调整顺序直接拖动条目即可。
 - `prompt` 的 `value` 若为 `/xxx`，需对应一个真实存在的 prompt（如 `commit.prompt.md`），slash 命令才有效。

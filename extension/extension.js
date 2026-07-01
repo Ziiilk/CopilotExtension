@@ -240,6 +240,7 @@ function buildInjectionScript(buttons, memos, bridge) {
   var MEMORY_TOKEN = ${JSON.stringify(MEMORY_TOKEN)};
   var TERMINALS_TOKEN = ${JSON.stringify(TERMINALS_TOKEN)};
   var FOCUS_TOKEN = ${JSON.stringify(FOCUS_TOKEN)};
+  var FIND_TOKEN = ${JSON.stringify(FIND_TOKEN)};
   var BADGE_TOKENS = ${JSON.stringify([...badgeProviders.keys()])};
   var BRIDGE_ENDPOINTS = ${endpointsLit};
   var CPX_TOKEN = ${tokenLit};
@@ -270,7 +271,17 @@ function buildInjectionScript(buttons, memos, bridge) {
       // Our hover isn't sized by VS Code's hover service, so the absolute
       // .monaco-hover would shrink-to-min (a tall narrow column). max-content
       // makes it hug the text and wrap at the reused .hover-contents max-width.
-      '.cpx-hover .monaco-hover{width:max-content}';
+      '.cpx-hover .monaco-hover{width:max-content}' +
+      // Floating find bar pinned to the top-right of the chat list (positioned
+      // in JS from the list rect; fixed so it stays put while the list scrolls).
+      '.cpx-find-widget{position:fixed;z-index:2600;display:flex;align-items:center;gap:3px;padding:4px 6px;border-radius:4px;background:var(--vscode-editorWidget-background);color:var(--vscode-editorWidget-foreground,var(--vscode-foreground));border:1px solid var(--vscode-editorWidget-border,var(--vscode-widget-border,transparent));box-shadow:0 2px 8px var(--vscode-widget-shadow,rgba(0,0,0,.36));font-family:var(--vscode-font-family);font-size:12px}' +
+      '.cpx-find-widget .cpx-find-input{width:180px;height:22px;box-sizing:border-box;padding:2px 6px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border,transparent);border-radius:2px;outline:0}' +
+      '.cpx-find-widget .cpx-find-input:focus{border-color:var(--vscode-focusBorder)}' +
+      '.cpx-find-widget .cpx-find-count{min-width:58px;text-align:center;white-space:nowrap;color:var(--vscode-descriptionForeground);font-variant-numeric:tabular-nums}' +
+      '.cpx-find-widget .cpx-find-btn{width:22px;height:22px;display:flex;align-items:center;justify-content:center;border-radius:4px;cursor:pointer;color:inherit;font-size:16px;line-height:1}' +
+      '.cpx-find-widget .cpx-find-btn.disabled{opacity:.4;pointer-events:none}' +
+      'mark.cpx-find-hl{background-color:var(--vscode-editor-findMatchHighlightBackground,rgba(234,92,0,.33));color:inherit;padding:0;border:1px solid var(--vscode-editor-findMatchHighlightBorder,transparent);border-radius:2px;box-sizing:border-box}' +
+      'mark.cpx-find-current{background-color:var(--vscode-editor-findMatchBackground,rgba(234,92,0,.66));border:1px solid var(--vscode-editor-findMatchBorder,var(--vscode-focusBorder,transparent))}';
     (document.head || document.documentElement).appendChild(st);
   }
 
@@ -897,6 +908,459 @@ function buildInjectionScript(buttons, memos, bridge) {
     else cleanupTerminalsNow();
   }
 
+  // ---- Find in conversation (Ctrl+F-style, in-DOM) --------------------------
+  // A floating find bar pinned to the top-right of the chat list. It searches
+  // the WHOLE conversation, not just the rows currently rendered: the chat list
+  // is a virtualized monaco-list (only visible messages exist in the DOM), so we
+  // drive it with synthetic wheel events (the same gesture its ScrollableElement
+  // listens for), walk from top to bottom collecting each message row's text
+  // keyed by its stable data-index, then compute matches. Navigating a match
+  // scrolls its row back into view and highlights the exact occurrence. All
+  // purely in the workbench DOM: no bridge round-trip is involved.
+  var findState = null;
+  var findHls = [];
+  var findSearchTimer = null;
+  var findScanSeq = 0;
+
+  // Resolve the chat list's scroll pieces: the list viewport, the rows
+  // container, and the scrollable element that consumes wheel events.
+  function getFindScroller(session) {
+    var listEl = session.querySelector('.interactive-list .monaco-list') || session.querySelector('.monaco-list');
+    if (!listEl) return null;
+    var rows = listEl.querySelector('.monaco-list-rows');
+    if (!rows) return null;
+    var scrollable = listEl.querySelector('.monaco-scrollable-element') || listEl;
+    return { listEl: listEl, rows: rows, scrollable: scrollable };
+  }
+
+  // The message-content node inside a row. Restricting to it (instead of the
+  // whole row) keeps toolbar/label chrome out of the searched text, and lets the
+  // scan text and the highlight walk agree on offsets.
+  function rowContentEl(rowEl) {
+    return rowEl.querySelector('.interactive-item-container .value') ||
+      rowEl.querySelector('.interactive-item-container') || rowEl;
+  }
+  function rowText(rowEl) {
+    var c = rowContentEl(rowEl);
+    return c ? (c.textContent || '') : '';
+  }
+
+  // Currently rendered rows, ascending by data-index.
+  function findRenderedRows(scr) {
+    var out = [];
+    var els = scr.rows.querySelectorAll('.monaco-list-row');
+    for (var i = 0; i < els.length; i++) {
+      var di = els[i].getAttribute('data-index');
+      if (di == null) continue;
+      out.push({ index: Number(di), el: els[i] });
+    }
+    out.sort(function (a, b) { return a.index - b.index; });
+    return out;
+  }
+  function findTotalItems(scr) {
+    var el = scr.rows.querySelector('.monaco-list-row[aria-setsize]');
+    if (el) { var n = Number(el.getAttribute('aria-setsize')); if (n > 0) return n; }
+    return -1;
+  }
+  function findPageHeight(scr) {
+    var r = scr.listEl.getBoundingClientRect();
+    return Math.max(120, Math.round(r.height * 0.85));
+  }
+  function findWheel(scr, dy) {
+    try {
+      scr.scrollable.dispatchEvent(new WheelEvent('wheel', { deltaY: dy, deltaMode: 0, bubbles: true, cancelable: true }));
+    } catch (e) {}
+  }
+  function findRowByIndex(scr, index) {
+    return scr.rows.querySelector('.monaco-list-row[data-index="' + index + '"]');
+  }
+  // Signed distance to move a rect's center onto the list viewport's center.
+  function findCenterDelta(rect, viewportRect) {
+    return (rect.top + rect.height / 2) - (viewportRect.top + viewportRect.height / 2);
+  }
+
+  // Scroll the virtualized list top-to-bottom, recording every message row's
+  // text by data-index, then compute match positions. cb receives an array of
+  // { index, occ } (occ = occurrence number within that row's text).
+  function scanConversation(scr, query, seq, cb) {
+    var q = query.toLowerCase();
+    var seen = Object.create(null);
+    var total = -1;
+    var capTop = 400, capDown = 1500;
+    var lastSig = '', stuck = 0;
+    // Bail out of the async scroll chain once this scan is superseded (new query)
+    // or the find bar closed — otherwise it keeps dispatching wheel events and
+    // scrolling the user's chat after we're done with it.
+    function aborted() { return !findState || seq !== findScanSeq; }
+
+    function record() {
+      var rows = findRenderedRows(scr);
+      for (var i = 0; i < rows.length; i++) {
+        if (!(rows[i].index in seen)) seen[rows[i].index] = rowText(rows[i].el);
+      }
+      var t = findTotalItems(scr);
+      if (t > 0) total = t;
+      return rows;
+    }
+    function sig(rows) {
+      if (!rows.length) return 'empty';
+      return rows[0].index + '/' + Math.round(rows[0].el.getBoundingClientRect().top) + '/' + rows[rows.length - 1].index;
+    }
+    function toTop() {
+      if (aborted()) return;
+      var rows = record();
+      var s = sig(rows);
+      var lr = scr.listEl.getBoundingClientRect();
+      var atTop = rows.length && rows[0].index === 0 && rows[0].el.getBoundingClientRect().top >= (lr.top - 2);
+      if (atTop || (s === lastSig && ++stuck >= 3) || --capTop <= 0) {
+        lastSig = ''; stuck = 0; downStep(); return;
+      }
+      if (s !== lastSig) { stuck = 0; lastSig = s; }
+      findWheel(scr, -findPageHeight(scr));
+      setTimeout(toTop, 70);
+    }
+    function downStep() {
+      if (aborted()) return;
+      var rows = record();
+      var s = sig(rows);
+      var lr = scr.listEl.getBoundingClientRect();
+      var haveLast = total > 0 && ((total - 1) in seen);
+      var lastRow = rows.length ? rows[rows.length - 1] : null;
+      var lastVisible = lastRow && lastRow.el.getBoundingClientRect().bottom <= lr.bottom + 2;
+      if ((haveLast && lastVisible) || (s === lastSig && ++stuck >= 3) || --capDown <= 0) {
+        finish(); return;
+      }
+      if (s !== lastSig) { stuck = 0; lastSig = s; }
+      findWheel(scr, findPageHeight(scr));
+      setTimeout(downStep, 70);
+    }
+    function finish() {
+      record();
+      var idxs = Object.keys(seen).map(Number).sort(function (a, b) { return a - b; });
+      var matches = [];
+      for (var k = 0; k < idxs.length; k++) {
+        var di = idxs[k];
+        var text = (seen[di] || '').toLowerCase();
+        if (!text) continue;
+        var pos = 0, occ = 0;
+        while ((pos = text.indexOf(q, pos)) !== -1) {
+          matches.push({ index: di, occ: occ });
+          occ++; pos += q.length;
+          if (occ > 5000) break;
+        }
+      }
+      cb(matches);
+    }
+    toTop();
+  }
+
+  // Text nodes under a root, in document order.
+  function findTextNodes(root) {
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    var nodes = [], n;
+    while ((n = walker.nextNode())) { if (n.nodeValue && n.nodeValue.length) nodes.push(n); }
+    return nodes;
+  }
+
+  // Remove every highlight mark, restoring the original text nodes.
+  function clearFindHighlights() {
+    var parents = [];
+    for (var i = 0; i < findHls.length; i++) {
+      var mk = findHls[i];
+      if (mk && mk.parentNode) {
+        var p = mk.parentNode;
+        p.replaceChild(document.createTextNode(mk.textContent || ''), mk);
+        if (parents.indexOf(p) === -1) parents.push(p);
+      }
+    }
+    findHls = [];
+    for (var j = 0; j < parents.length; j++) { try { parents[j].normalize(); } catch (e) {} }
+  }
+
+  // Highlight every occurrence of query inside a row, tagging the occ-th one as
+  // current. Matches are computed on the row's concatenated text (same basis as
+  // the scan) so occ numbering lines up. Occurrences that straddle element
+  // boundaries aren't wrapped (kept simple) but the current one still yields a
+  // scroll target. Returns the current mark/element to center on, or null.
+  function highlightOccurrence(rowEl, query, occ) {
+    var root = rowContentEl(rowEl);
+    if (!root) return null;
+    var q = query.toLowerCase();
+    var nodes = findTextNodes(root);
+    var s = '', map = [];
+    for (var i = 0; i < nodes.length; i++) { map.push({ node: nodes[i], start: s.length }); s += nodes[i].nodeValue; }
+    var lower = s.toLowerCase();
+    var occs = [], pos = 0;
+    while ((pos = lower.indexOf(q, pos)) !== -1) { occs.push(pos); pos += q.length; }
+    if (!occs.length) return null;
+    function locate(offset) {
+      for (var k = map.length - 1; k >= 0; k--) { if (offset >= map[k].start) return { node: map[k].node, local: offset - map[k].start }; }
+      return null;
+    }
+    var groups = [], groupMap = new Map(), straddleTarget = null;
+    for (var oi = 0; oi < occs.length; oi++) {
+      var start = occs[oi], end = occs[oi] + q.length;
+      var a = locate(start), b = locate(end - 1);
+      var isCur = oi === occ;
+      if (a && b && a.node === b.node) {
+        var g = groupMap.get(a.node);
+        if (!g) { g = { node: a.node, segs: [] }; groupMap.set(a.node, g); groups.push(g); }
+        g.segs.push({ start: a.local, end: a.local + q.length, current: isCur });
+      } else if (a && isCur) {
+        straddleTarget = a.node.parentNode || a.node;
+      }
+    }
+    var currentMark = null;
+    for (var gi = 0; gi < groups.length; gi++) {
+      var grp = groups[gi], node = grp.node, text = node.nodeValue;
+      grp.segs.sort(function (x, y) { return x.start - y.start; });
+      var frag = document.createDocumentFragment(), last = 0;
+      for (var si = 0; si < grp.segs.length; si++) {
+        var seg = grp.segs[si];
+        if (seg.start > last) frag.appendChild(document.createTextNode(text.slice(last, seg.start)));
+        var mk = document.createElement('mark');
+        mk.className = 'cpx-find-hl' + (seg.current ? ' cpx-find-current' : '');
+        mk.textContent = text.slice(seg.start, seg.end);
+        if (seg.current) currentMark = mk;
+        frag.appendChild(mk); findHls.push(mk); last = seg.end;
+      }
+      if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+      node.parentNode.replaceChild(frag, node);
+    }
+    return currentMark || straddleTarget;
+  }
+
+  // Bring the row with the given data-index into view (wheel-scrolling the
+  // virtualized list until it renders), roughly center it, then invoke cb(row).
+  function findScrollToRow(scr, target, cb) {
+    var cap = 800;
+    function rowOf() { return findRowByIndex(scr, target); }
+    function step() {
+      if (!findState) { cb(null); return; }
+      var row = rowOf();
+      if (row) {
+        var lr = scr.listEl.getBoundingClientRect();
+        var rr = row.getBoundingClientRect();
+        var delta = findCenterDelta(rr, lr);
+        if (Math.abs(delta) > 8 && cap-- > 0) {
+          findWheel(scr, delta);
+          setTimeout(function () { cb(rowOf() || row); }, 80);
+        } else {
+          cb(row);
+        }
+        return;
+      }
+      if (cap-- <= 0) { cb(null); return; }
+      var rows = findRenderedRows(scr);
+      var dir = 1;
+      if (rows.length && target < rows[0].index) dir = -1;
+      findWheel(scr, dir * findPageHeight(scr));
+      setTimeout(step, 70);
+    }
+    step();
+  }
+
+  function findUpdateCount() {
+    if (!findState) return;
+    var n = findState.matches.length;
+    var el = findState.countEl;
+    if (!findState.query) el.textContent = '';
+    else if (findState.scanning) el.textContent = '搜索中…';
+    else if (!n) el.textContent = '无结果';
+    else el.textContent = (findState.current + 1) + ' / ' + n;
+    var disabled = n <= 0;
+    findState.prevBtn.classList.toggle('disabled', disabled);
+    findState.nextBtn.classList.toggle('disabled', disabled);
+  }
+
+  // Re-highlight every match in the currently rendered rows, tagging the active
+  // match as current. Clears first so it's idempotent and
+  // safe to re-run after the virtualized list re-renders a row (which wipes our
+  // injected marks). Off-screen rows can't be highlighted — they don't exist in
+  // the DOM — so this mirrors what's visible, like a scroll-following overlay.
+  function findCurrentMatch() {
+    return (findState && findState.current >= 0) ? findState.matches[findState.current] : null;
+  }
+
+  function refreshHighlights() {
+    if (!findState || !findState.query) return;
+    clearFindHighlights();
+    var q = findState.query;
+    var cur = findCurrentMatch();
+    var curIndex = cur ? cur.index : -1;
+    var curOcc = cur ? cur.occ : -1;
+    var rows = findRenderedRows(findState.scr);
+    for (var i = 0; i < rows.length; i++) {
+      var occ = (rows[i].index === curIndex) ? curOcc : -1;
+      highlightOccurrence(rows[i].el, q, occ);
+    }
+  }
+
+  // After navigating to a match, the chat list often re-renders that row a beat
+  // later (streaming, re-measure, recycling), discarding our marks. Poll briefly
+  // and re-apply whenever the current mark has gone missing, so the active match
+  // stays visibly highlighted instead of flashing once and vanishing.
+  function keepCurrentHighlight() {
+    if (findState.keepTimer) { clearInterval(findState.keepTimer); findState.keepTimer = null; }
+    var tries = 0;
+    findState.keepTimer = setInterval(function () {
+      if (!findState) return;
+      tries++;
+      var cur = findCurrentMatch();
+      var row = cur ? findRowByIndex(findState.scr, cur.index) : null;
+      if (row && !row.querySelector('mark.cpx-find-current')) refreshHighlights();
+      if (tries >= 12) { clearInterval(findState.keepTimer); findState.keepTimer = null; }
+    }, 150);
+  }
+
+  function findGoto(i) {
+    if (!findState || !findState.matches.length) return;
+    var n = findState.matches.length;
+    i = ((i % n) + n) % n;
+    findState.current = i;
+    findUpdateCount();
+    var m = findState.matches[i];
+    var scr = findState.scr;
+    findScrollToRow(scr, m.index, function (rowEl) {
+      if (!rowEl || !findState) return;
+      refreshHighlights();
+      var curRow = findRowByIndex(scr, m.index);
+      var cur = curRow && curRow.querySelector('mark.cpx-find-current');
+      if (cur && cur.getBoundingClientRect) {
+        var delta = findCenterDelta(cur.getBoundingClientRect(), scr.listEl.getBoundingClientRect());
+        if (Math.abs(delta) > 24) {
+          findWheel(scr, delta);
+          setTimeout(function () { if (findState) refreshHighlights(); }, 80);
+        }
+      }
+      keepCurrentHighlight();
+    });
+  }
+
+  function findNavigate(delta) {
+    if (!findState || !findState.matches.length) return;
+    findGoto(findState.current + delta);
+  }
+
+  function findRunSearch() {
+    if (!findState) return;
+    var q = findState.query;
+    clearFindHighlights();
+    if (findState.keepTimer) { clearInterval(findState.keepTimer); findState.keepTimer = null; }
+    if (!q) { findState.matches = []; findState.current = -1; findState.scanning = false; findUpdateCount(); return; }
+    findState.scanning = true;
+    findUpdateCount();
+    var pre = findRenderedRows(findState.scr);
+    var preIndex = pre.length ? pre[0].index : 0;
+    var seq = ++findScanSeq;
+    scanConversation(findState.scr, q, seq, function (matches) {
+      if (!findState || seq !== findScanSeq) return;
+      findState.matches = matches;
+      findState.scanning = false;
+      findState.current = matches.length ? 0 : -1;
+      findUpdateCount();
+      if (matches.length) findGoto(0);
+      else findScrollToRow(findState.scr, preIndex, function () {});
+    });
+  }
+
+  function findPositionWidget() {
+    if (!findState) return;
+    var r = findState.scr.listEl.getBoundingClientRect();
+    var w = findState.widget;
+    var ww = w.offsetWidth || 320;
+    w.style.top = Math.round(r.top + 6) + 'px';
+    w.style.left = Math.round(Math.max(6, r.right - ww - 16)) + 'px';
+  }
+
+  function closeFind() {
+    if (!findState) return;
+    clearFindHighlights();
+    if (findSearchTimer) { clearTimeout(findSearchTimer); findSearchTimer = null; }
+    if (findState.keepTimer) { clearInterval(findState.keepTimer); findState.keepTimer = null; }
+    findScanSeq++;
+    window.removeEventListener('resize', findState.reposition, true);
+    if (findState.widget && findState.widget.parentNode) findState.widget.parentNode.removeChild(findState.widget);
+    findState = null;
+  }
+
+  function findBtn(icon, tip) {
+    var a = mkEl('a', '');
+    a.className = 'cpx-find-btn codicon codicon-' + icon;
+    a.title = tip;
+    a.setAttribute('role', 'button');
+    a.setAttribute('tabindex', '0');
+    hoverBg(a, '--vscode-toolbar-hoverBackground');
+    return a;
+  }
+
+  function buildFindWidget(session, scr) {
+    var widget = mkEl('div', '');
+    widget.className = 'cpx-find-widget';
+    var input = mkEl('input', '');
+    input.className = 'cpx-find-input';
+    input.type = 'text';
+    input.placeholder = '在会话中查找';
+    var count = mkEl('span', '', '');
+    count.className = 'cpx-find-count';
+    var prev = findBtn('arrow-up', '上一个匹配 (Shift+Enter)');
+    var next = findBtn('arrow-down', '下一个匹配 (Enter)');
+    var close = findBtn('close', '关闭 (Esc)');
+    widget.appendChild(input);
+    widget.appendChild(count);
+    widget.appendChild(prev);
+    widget.appendChild(next);
+    widget.appendChild(close);
+    (document.querySelector('.monaco-workbench') || document.body).appendChild(widget);
+
+    findState = {
+      session: session, scr: scr, widget: widget, input: input, countEl: count,
+      prevBtn: prev, nextBtn: next, query: '', matches: [], current: -1, scanning: false,
+      reposition: function () { findPositionWidget(); }
+    };
+
+    prev.addEventListener('click', function () { findNavigate(-1); });
+    next.addEventListener('click', function () { findNavigate(1); });
+    close.addEventListener('click', closeFind);
+    input.addEventListener('input', function () {
+      findState.query = input.value;
+      if (findSearchTimer) clearTimeout(findSearchTimer);
+      findSearchTimer = setTimeout(findRunSearch, 300);
+    });
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (findState.scanning) return;
+        findNavigate(e.shiftKey ? -1 : 1);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        closeFind();
+      }
+    });
+    window.addEventListener('resize', findState.reposition, true);
+    findPositionWidget();
+    findUpdateCount();
+    setTimeout(function () { try { input.focus(); } catch (e) {} }, 0);
+  }
+
+  // Entry point for the #find chat button. Toggles the find bar for the chat
+  // session that owns the clicked button.
+  function triggerFind(anchor) {
+    try {
+      var session = findSession(anchor);
+      if (!session) return;
+      if (findState) {
+        if (findState.session === session) { closeFind(); return; }
+        closeFind();
+      }
+      var scr = getFindScroller(session);
+      if (!scr) { console.warn('[cpx] find: no chat list'); return; }
+      buildFindWidget(session, scr);
+    } catch (e) {
+      console.error('[cpx] find failed:', e);
+    }
+  }
+
   // Generic count bubble for any #tool:copilot-extension/* button whose token
   // the host registered a badge provider for (BADGE_TOKENS). Per-token counts
   // come from the badgeCounts bridge op and are re-applied after every row
@@ -1089,6 +1553,7 @@ function buildInjectionScript(buttons, memos, bridge) {
       if (split) { split.primary(a); return; }
       if (b.text === MEMO_TOKEN) { triggerMemo(a); return; }
       if (b.text === MEMORY_TOKEN) { triggerMemory(); return; }
+      if (b.text === FIND_TOKEN) { triggerFind(a); return; }
       if (b.text === FOCUS_TOKEN) { toggleChatFocus(); return; }
       submit(b.text, a, b.submit);
     });
@@ -1568,6 +2033,9 @@ const TERMINALS_TOKEN = TOKEN_PREFIX + 'terminals';
 
 /** Special macro token that toggles chat-focus (spread / restore). */
 const FOCUS_TOKEN = TOKEN_PREFIX + 'focus';
+
+/** Special macro token that opens the in-conversation find bar. */
+const FIND_TOKEN = TOKEN_PREFIX + 'find';
 
 /**
  * @typedef {{ label: string, text: string }} Memo
