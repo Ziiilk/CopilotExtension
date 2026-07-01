@@ -280,8 +280,8 @@ function buildInjectionScript(buttons, memos, bridge) {
       '.cpx-find-widget .cpx-find-count{min-width:58px;text-align:center;white-space:nowrap;color:var(--vscode-descriptionForeground);font-variant-numeric:tabular-nums}' +
       '.cpx-find-widget .cpx-find-btn{width:22px;height:22px;display:flex;align-items:center;justify-content:center;border-radius:4px;cursor:pointer;color:inherit;font-size:16px;line-height:1}' +
       '.cpx-find-widget .cpx-find-btn.disabled{opacity:.4;pointer-events:none}' +
-      'mark.cpx-find-hl{background-color:var(--vscode-editor-findMatchHighlightBackground,rgba(234,92,0,.33));color:inherit;padding:0;border:1px solid var(--vscode-editor-findMatchHighlightBorder,transparent);border-radius:2px;box-sizing:border-box}' +
-      'mark.cpx-find-current{background-color:var(--vscode-editor-findMatchBackground,rgba(234,92,0,.66));border:1px solid var(--vscode-editor-findMatchBorder,var(--vscode-focusBorder,transparent))}';
+      'mark.cpx-find-hl{background-color:var(--vscode-editor-findMatchHighlightBackground,rgba(255,201,20,.5));color:inherit;padding:0;border:1px solid var(--vscode-editor-findMatchHighlightBorder,rgba(255,201,20,.85));border-radius:2px;box-sizing:border-box}' +
+      'mark.cpx-find-current{background-color:var(--vscode-editor-findMatchBackground,rgba(255,140,0,.92));color:var(--vscode-editor-foreground,inherit);padding:0;border-radius:2px;border:1px solid var(--vscode-editor-findMatchBorder,var(--vscode-focusBorder,#ff8c00));box-shadow:0 0 0 2px var(--vscode-focusBorder,#ff8c00)}';
     (document.head || document.documentElement).appendChild(st);
   }
 
@@ -968,7 +968,17 @@ function buildInjectionScript(buttons, memos, bridge) {
   }
   function findWheel(scr, dy) {
     try {
-      scr.scrollable.dispatchEvent(new WheelEvent('wheel', { deltaY: dy, deltaMode: 0, bubbles: true, cancelable: true }));
+      var ev = new WheelEvent('wheel', { deltaY: dy, deltaX: 0, deltaMode: 0, bubbles: true, cancelable: true });
+      // VS Code's StandardWheelEvent reads the legacy wheelDeltaY first, and a
+      // constructor-built WheelEvent leaves it at 0 — so the list would not move
+      // at all. Set it explicitly: the workbench maps scrollTop change to
+      // 50 * (wheelDeltaY / 120), so wheelDeltaY = -2.4 * dy scrolls dy pixels
+      // (positive dy scrolls down).
+      var wd = -Math.round(dy * 2.4);
+      Object.defineProperty(ev, 'wheelDeltaY', { value: wd, configurable: true });
+      Object.defineProperty(ev, 'wheelDelta', { value: wd, configurable: true });
+      Object.defineProperty(ev, 'wheelDeltaX', { value: 0, configurable: true });
+      scr.scrollable.dispatchEvent(ev);
     } catch (e) {}
   }
   function findRowByIndex(scr, index) {
@@ -978,6 +988,49 @@ function buildInjectionScript(buttons, memos, bridge) {
   function findCenterDelta(rect, viewportRect) {
     return (rect.top + rect.height / 2) - (viewportRect.top + viewportRect.height / 2);
   }
+  function findElementCenterDelta(scr, el) {
+    return findCenterDelta(el.getBoundingClientRect(), scr.listEl.getBoundingClientRect());
+  }
+  // Compact signature of the list's scroll state (top row index + its pixel
+  // offset + bottom row index). Equal across ticks means the scroll has settled.
+  // Single pass over the rendered rows (rather than building+sorting an array)
+  // since this runs on every settle tick.
+  function findScrollSig(scr) {
+    var els = scr.rows.querySelectorAll('.monaco-list-row');
+    var minEl = null, minI = Infinity, maxI = -Infinity;
+    for (var i = 0; i < els.length; i++) {
+      var di = els[i].getAttribute('data-index');
+      if (di == null) continue;
+      di = Number(di);
+      if (di < minI) { minI = di; minEl = els[i]; }
+      if (di > maxI) maxI = di;
+    }
+    if (!minEl) return 'empty';
+    return minI + '/' + Math.round(minEl.getBoundingClientRect().top) + '/' + maxI;
+  }
+  // Dispatch one wheel step and wait for the momentum scroll to settle, then
+  // cb(moved). Settled means the signature held steady for a couple of ticks AND
+  // we either saw it move or waited past the scroll's start-up latency, so a real
+  // boundary (no movement) isn't confused with the brief pause before momentum
+  // begins. Acting only after settling avoids piling up inertia that would
+  // otherwise fight the next opposite step and pin the list against the top.
+  function findWheelSettle(scr, dy, cb) {
+    var before = findScrollSig(scr);
+    findWheel(scr, dy);
+    var last = before, stableTicks = 0, waited = 0, movedEver = false;
+    var iv = setInterval(function () {
+      if (!findState) { clearInterval(iv); return; }
+      waited += 40;
+      var s = findScrollSig(scr);
+      if (s !== before) movedEver = true;
+      if (s === last) stableTicks++; else { last = s; stableTicks = 0; }
+      var settled = (stableTicks >= 2 && (movedEver || waited >= 240)) || waited >= 900;
+      if (settled) {
+        clearInterval(iv);
+        cb(movedEver);
+      }
+    }, 40);
+  }
 
   // Scroll the virtualized list top-to-bottom, recording every message row's
   // text by data-index, then compute match positions. cb receives an array of
@@ -986,11 +1039,9 @@ function buildInjectionScript(buttons, memos, bridge) {
     var q = query.toLowerCase();
     var seen = Object.create(null);
     var total = -1;
-    var capTop = 400, capDown = 1500;
-    var lastSig = '', stuck = 0;
-    // Bail out of the async scroll chain once this scan is superseded (new query)
-    // or the find bar closed — otherwise it keeps dispatching wheel events and
-    // scrolling the user's chat after we're done with it.
+    var steps = 0;
+    // Stop the async scroll chain once this scan is superseded (new query) or the
+    // find bar closed — otherwise it keeps dispatching wheel events into the chat.
     function aborted() { return !findState || seq !== findScanSeq; }
 
     function record() {
@@ -998,41 +1049,35 @@ function buildInjectionScript(buttons, memos, bridge) {
       for (var i = 0; i < rows.length; i++) {
         if (!(rows[i].index in seen)) seen[rows[i].index] = rowText(rows[i].el);
       }
-      var t = findTotalItems(scr);
-      if (t > 0) total = t;
+      // aria-setsize is constant, so resolve the total once and stop re-querying.
+      if (total <= 0) { var t = findTotalItems(scr); if (t > 0) total = t; }
       return rows;
     }
-    function sig(rows) {
-      if (!rows.length) return 'empty';
-      return rows[0].index + '/' + Math.round(rows[0].el.getBoundingClientRect().top) + '/' + rows[rows.length - 1].index;
-    }
     function toTop() {
-      if (aborted()) return;
-      var rows = record();
-      var s = sig(rows);
+      if (aborted() || ++steps > 3000) return;
+      record();
+      var rows = findRenderedRows(scr);
       var lr = scr.listEl.getBoundingClientRect();
       var atTop = rows.length && rows[0].index === 0 && rows[0].el.getBoundingClientRect().top >= (lr.top - 2);
-      if (atTop || (s === lastSig && ++stuck >= 3) || --capTop <= 0) {
-        lastSig = ''; stuck = 0; downStep(); return;
-      }
-      if (s !== lastSig) { stuck = 0; lastSig = s; }
-      findWheel(scr, -findPageHeight(scr));
-      setTimeout(toTop, 70);
+      if (atTop) { down(); return; }
+      findWheelSettle(scr, -findPageHeight(scr), function (moved) {
+        if (aborted()) return;
+        if (moved) toTop(); else down();
+      });
     }
-    function downStep() {
-      if (aborted()) return;
+    function down() {
+      if (aborted() || ++steps > 3000) return;
       var rows = record();
-      var s = sig(rows);
       var lr = scr.listEl.getBoundingClientRect();
       var haveLast = total > 0 && ((total - 1) in seen);
       var lastRow = rows.length ? rows[rows.length - 1] : null;
-      var lastVisible = lastRow && lastRow.el.getBoundingClientRect().bottom <= lr.bottom + 2;
-      if ((haveLast && lastVisible) || (s === lastSig && ++stuck >= 3) || --capDown <= 0) {
-        finish(); return;
-      }
-      if (s !== lastSig) { stuck = 0; lastSig = s; }
-      findWheel(scr, findPageHeight(scr));
-      setTimeout(downStep, 70);
+      var atBottom = lastRow && haveLast && lastRow.el.getBoundingClientRect().bottom <= lr.bottom + 2;
+      if (atBottom) { finish(); return; }
+      findWheelSettle(scr, findPageHeight(scr), function (moved) {
+        if (aborted()) return;
+        record();
+        if (moved) down(); else finish();
+      });
     }
     function finish() {
       record();
@@ -1133,29 +1178,31 @@ function buildInjectionScript(buttons, memos, bridge) {
   // Bring the row with the given data-index into view (wheel-scrolling the
   // virtualized list until it renders), roughly center it, then invoke cb(row).
   function findScrollToRow(scr, target, cb) {
-    var cap = 800;
-    function rowOf() { return findRowByIndex(scr, target); }
+    var steps = 0;
+    // Once the target row is rendered, nudge it toward the viewport center. The
+    // wheel-to-pixel mapping isn't exact (device pixel ratio etc.), so converge
+    // iteratively rather than trusting a single delta.
+    function center(row) {
+      if (!findState || ++steps > 400) { cb(row); return; }
+      var delta = findElementCenterDelta(scr, row);
+      if (Math.abs(delta) <= 40) { cb(row); return; }
+      findWheelSettle(scr, delta, function (moved) {
+        var r2 = findRowByIndex(scr, target);
+        if (!findState || !r2 || !moved) { cb(r2 || row); return; }
+        center(r2);
+      });
+    }
     function step() {
-      if (!findState) { cb(null); return; }
-      var row = rowOf();
-      if (row) {
-        var lr = scr.listEl.getBoundingClientRect();
-        var rr = row.getBoundingClientRect();
-        var delta = findCenterDelta(rr, lr);
-        if (Math.abs(delta) > 8 && cap-- > 0) {
-          findWheel(scr, delta);
-          setTimeout(function () { cb(rowOf() || row); }, 80);
-        } else {
-          cb(row);
-        }
-        return;
-      }
-      if (cap-- <= 0) { cb(null); return; }
+      if (!findState || ++steps > 400) { cb(findRowByIndex(scr, target)); return; }
+      var row = findRowByIndex(scr, target);
+      if (row) { center(row); return; }
       var rows = findRenderedRows(scr);
-      var dir = 1;
-      if (rows.length && target < rows[0].index) dir = -1;
-      findWheel(scr, dir * findPageHeight(scr));
-      setTimeout(step, 70);
+      var dir = (rows.length && target < rows[0].index) ? -1 : 1;
+      findWheelSettle(scr, dir * findPageHeight(scr), function (moved) {
+        if (!findState) { cb(null); return; }
+        if (!moved) { cb(findRowByIndex(scr, target)); return; }
+        step();
+      });
     }
     step();
   }
@@ -1227,10 +1274,9 @@ function buildInjectionScript(buttons, memos, bridge) {
       var curRow = findRowByIndex(scr, m.index);
       var cur = curRow && curRow.querySelector('mark.cpx-find-current');
       if (cur && cur.getBoundingClientRect) {
-        var delta = findCenterDelta(cur.getBoundingClientRect(), scr.listEl.getBoundingClientRect());
+        var delta = findElementCenterDelta(scr, cur);
         if (Math.abs(delta) > 24) {
-          findWheel(scr, delta);
-          setTimeout(function () { if (findState) refreshHighlights(); }, 80);
+          findWheelSettle(scr, delta, function () { if (findState) refreshHighlights(); });
         }
       }
       keepCurrentHighlight();
