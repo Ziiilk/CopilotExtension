@@ -920,7 +920,6 @@ function buildInjectionScript(buttons, memos, bridge) {
   var findState = null;
   var findHls = [];
   var findSearchTimer = null;
-  var findScanSeq = 0;
 
   // Resolve the chat list's scroll pieces: the list viewport, the rows
   // container, and the scrollable element that consumes wheel events.
@@ -1032,71 +1031,115 @@ function buildInjectionScript(buttons, memos, bridge) {
     }, 40);
   }
 
-  // Scroll the virtualized list top-to-bottom, recording every message row's
-  // text by data-index, then compute match positions. cb receives an array of
-  // { index, occ } (occ = occurrence number within that row's text).
-  function scanConversation(scr, query, seq, cb) {
-    var q = query.toLowerCase();
-    var seen = Object.create(null);
-    var total = -1;
-    var steps = 0;
-    // Stop the async scroll chain once this scan is superseded (new query) or the
-    // find bar closed — otherwise it keeps dispatching wheel events into the chat.
-    function aborted() { return !findState || seq !== findScanSeq; }
+  // ---- Lazy incremental search ---------------------------------------------
+  // Rather than scroll the whole (virtualized) conversation up front, we search
+  // outward from the current view on demand: the first result comes from the
+  // rows already rendered, and each Next/Prev scrolls only as far as needed to
+  // reach the following match. findState.seen tracks the contiguous range of
+  // rows examined so far, so matches within it are complete and correctly
+  // ordered; the total is only exact once both ends are reached (shown as
+  // "k / n+" until then).
+  function findMatchCmp(a, b) { return (a.index - b.index) || (a.occ - b.occ); }
 
-    function record() {
-      var rows = findRenderedRows(scr);
-      for (var i = 0; i < rows.length; i++) {
-        if (!(rows[i].index in seen)) seen[rows[i].index] = rowText(rows[i].el);
+  // A fresh navigation token: bumps navSeq and returns a stale() predicate that
+  // reports once a newer navigation/search superseded this one, so their scroll
+  // loops can't run at the same time and fight each other.
+  function findNewNavToken() {
+    var n = findState.navSeq = (findState.navSeq || 0) + 1;
+    return function () { return !findState || findState.navSeq !== n; };
+  }
+
+  function findPosOf(key) {
+    if (!key) return -1;
+    var arr = findState.matches, lo = 0, hi = arr.length - 1;
+    while (lo <= hi) {
+      var mid = (lo + hi) >> 1, c = findMatchCmp(arr[mid], key);
+      if (c === 0) return mid;
+      if (c < 0) lo = mid + 1; else hi = mid - 1;
+    }
+    return -1;
+  }
+
+  // Character offsets of every occurrence of q (already lower-cased) in text.
+  function findOccurrencePositions(text, q) {
+    var out = [], lower = text.toLowerCase(), pos = 0;
+    while ((pos = lower.indexOf(q, pos)) !== -1) {
+      out.push(pos); pos += q.length;
+      if (out.length > 5000) break;
+    }
+    return out;
+  }
+
+  function findRowMatches(di, text, q) {
+    var ps = findOccurrencePositions(text, q), out = [];
+    for (var i = 0; i < ps.length; i++) out.push({ index: di, occ: i });
+    return out;
+  }
+
+  // Insert one new row's matches (a same-index block) into the sorted array. The
+  // row index is brand new, so the whole block lands at one position.
+  function findInsertRowMatches(rowMatches) {
+    if (!rowMatches.length) return;
+    var arr = findState.matches, di = rowMatches[0].index, lo = 0, hi = arr.length;
+    while (lo < hi) { var mid = (lo + hi) >> 1; if (arr[mid].index < di) lo = mid + 1; else hi = mid; }
+    Array.prototype.splice.apply(arr, [lo, 0].concat(rowMatches));
+  }
+
+  // Fold every not-yet-examined rendered row into the search state, extending the
+  // contiguous scanned range. Returns how many new matches were added.
+  function findRecordWindow() {
+    var rows = findRenderedRows(findState.scr);
+    if (findState.total < 0) { var t = findTotalItems(findState.scr); if (t > 0) findState.total = t; }
+    var added = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var di = rows[i].index;
+      if (findState.seen[di]) continue;
+      findState.seen[di] = true; findState.seenCount++;
+      var rm = findRowMatches(di, rowText(rows[i].el), findState.query);
+      if (rm.length) { findInsertRowMatches(rm); added += rm.length; }
+    }
+    return added;
+  }
+
+  function findFullyScanned() {
+    return (findState.total > 0 && findState.seenCount >= findState.total) ||
+      (findState.hitTop && findState.hitBottom);
+  }
+  function findScanPct() {
+    return (findState.total > 0) ? Math.min(100, Math.round(findState.seenCount / findState.total * 100)) : 0;
+  }
+
+  // The match nearest the current view (first one at/below the viewport top),
+  // used to pick which result to land on for the initial search.
+  function findFirstVisibleKey() {
+    var arr = findState.matches, scr = findState.scr;
+    var top = scr.listEl.getBoundingClientRect().top;
+    for (var i = 0; i < arr.length; i++) {
+      var row = findRowByIndex(scr, arr[i].index);
+      if (row && row.getBoundingClientRect().bottom >= top) return arr[i];
+    }
+    return arr[0];
+  }
+
+  // Scroll one page in dir (+1 down / -1 up), record newly rendered rows, and
+  // recurse until a physical boundary is hit — or, when stopOnMatch, as soon as a
+  // new match appears. cb(foundMatch). Keeps going through already-seen territory
+  // so it can reach unseen rows beyond it. stopOnMatch=false sweeps a whole end
+  // (used when wrapping) to nail down the exact total.
+  function findScan(dir, stopOnMatch, stale, cb) {
+    if (!findState || stale()) { cb(false); return; }
+    if (findFullyScanned() || (!stopOnMatch && (dir > 0 ? findState.hitBottom : findState.hitTop))) { cb(false); return; }
+    findWheelSettle(findState.scr, dir * findPageHeight(findState.scr), function (moved) {
+      if (!findState || stale()) { cb(false); return; }
+      var added = findRecordWindow();
+      if (findState.scanning) findUpdateCount();
+      if (stopOnMatch && added > 0) { cb(true); return; }
+      if (!moved) {
+        if (dir > 0) findState.hitBottom = true; else findState.hitTop = true;
+        cb(false); return;
       }
-      // aria-setsize is constant, so resolve the total once and stop re-querying.
-      if (total <= 0) { var t = findTotalItems(scr); if (t > 0) total = t; }
-      return rows;
-    }
-    function toTop() {
-      if (aborted() || ++steps > 3000) return;
-      record();
-      var rows = findRenderedRows(scr);
-      var lr = scr.listEl.getBoundingClientRect();
-      var atTop = rows.length && rows[0].index === 0 && rows[0].el.getBoundingClientRect().top >= (lr.top - 2);
-      if (atTop) { down(); return; }
-      findWheelSettle(scr, -findPageHeight(scr), function (moved) {
-        if (aborted()) return;
-        if (moved) toTop(); else down();
-      });
-    }
-    function down() {
-      if (aborted() || ++steps > 3000) return;
-      var rows = record();
-      var lr = scr.listEl.getBoundingClientRect();
-      var haveLast = total > 0 && ((total - 1) in seen);
-      var lastRow = rows.length ? rows[rows.length - 1] : null;
-      var atBottom = lastRow && haveLast && lastRow.el.getBoundingClientRect().bottom <= lr.bottom + 2;
-      if (atBottom) { finish(); return; }
-      findWheelSettle(scr, findPageHeight(scr), function (moved) {
-        if (aborted()) return;
-        record();
-        if (moved) down(); else finish();
-      });
-    }
-    function finish() {
-      record();
-      var idxs = Object.keys(seen).map(Number).sort(function (a, b) { return a - b; });
-      var matches = [];
-      for (var k = 0; k < idxs.length; k++) {
-        var di = idxs[k];
-        var text = (seen[di] || '').toLowerCase();
-        if (!text) continue;
-        var pos = 0, occ = 0;
-        while ((pos = text.indexOf(q, pos)) !== -1) {
-          matches.push({ index: di, occ: occ });
-          occ++; pos += q.length;
-          if (occ > 5000) break;
-        }
-      }
-      cb(matches);
-    }
-    toTop();
+      findScan(dir, stopOnMatch, stale, cb);
+    });
   }
 
   // Text nodes under a root, in document order.
@@ -1134,9 +1177,7 @@ function buildInjectionScript(buttons, memos, bridge) {
     var nodes = findTextNodes(root);
     var s = '', map = [];
     for (var i = 0; i < nodes.length; i++) { map.push({ node: nodes[i], start: s.length }); s += nodes[i].nodeValue; }
-    var lower = s.toLowerCase();
-    var occs = [], pos = 0;
-    while ((pos = lower.indexOf(q, pos)) !== -1) { occs.push(pos); pos += q.length; }
+    var occs = findOccurrencePositions(s, q);
     if (!occs.length) return null;
     function locate(offset) {
       for (var k = map.length - 1; k >= 0; k--) { if (offset >= map[k].start) return { node: map[k].node, local: offset - map[k].start }; }
@@ -1177,29 +1218,30 @@ function buildInjectionScript(buttons, memos, bridge) {
 
   // Bring the row with the given data-index into view (wheel-scrolling the
   // virtualized list until it renders), roughly center it, then invoke cb(row).
-  function findScrollToRow(scr, target, cb) {
+  function findScrollToRow(scr, target, stale, cb) {
     var steps = 0;
     // Once the target row is rendered, nudge it toward the viewport center. The
     // wheel-to-pixel mapping isn't exact (device pixel ratio etc.), so converge
-    // iteratively rather than trusting a single delta.
+    // iteratively rather than trusting a single delta. stale() lets a newer
+    // navigation cancel this one mid-scroll so the two don't fight (ping-pong).
     function center(row) {
-      if (!findState || ++steps > 400) { cb(row); return; }
+      if (!findState || stale() || ++steps > 400) { cb(row); return; }
       var delta = findElementCenterDelta(scr, row);
       if (Math.abs(delta) <= 40) { cb(row); return; }
       findWheelSettle(scr, delta, function (moved) {
         var r2 = findRowByIndex(scr, target);
-        if (!findState || !r2 || !moved) { cb(r2 || row); return; }
+        if (!findState || stale() || !r2 || !moved) { cb(r2 || row); return; }
         center(r2);
       });
     }
     function step() {
-      if (!findState || ++steps > 400) { cb(findRowByIndex(scr, target)); return; }
+      if (!findState || stale() || ++steps > 400) { cb(findRowByIndex(scr, target)); return; }
       var row = findRowByIndex(scr, target);
       if (row) { center(row); return; }
       var rows = findRenderedRows(scr);
       var dir = (rows.length && target < rows[0].index) ? -1 : 1;
       findWheelSettle(scr, dir * findPageHeight(scr), function (moved) {
-        if (!findState) { cb(null); return; }
+        if (!findState || stale()) { cb(null); return; }
         if (!moved) { cb(findRowByIndex(scr, target)); return; }
         step();
       });
@@ -1209,13 +1251,21 @@ function buildInjectionScript(buttons, memos, bridge) {
 
   function findUpdateCount() {
     if (!findState) return;
-    var n = findState.matches.length;
     var el = findState.countEl;
-    if (!findState.query) el.textContent = '';
-    else if (findState.scanning) el.textContent = '搜索中…';
-    else if (!n) el.textContent = '无结果';
-    else el.textContent = (findState.current + 1) + ' / ' + n;
-    var disabled = n <= 0;
+    var q = findState.query;
+    var arr = findState.matches;
+    var txt;
+    if (!q) {
+      txt = '';
+    } else if (!arr.length) {
+      txt = findFullyScanned() ? '无结果' : ('搜索中… ' + findScanPct() + '%');
+    } else {
+      var pos = findPosOf(findState.curKey);
+      var k = pos >= 0 ? (pos + 1) : 0;
+      txt = k + ' / ' + arr.length + (findFullyScanned() ? '' : '+');
+    }
+    if (el.textContent !== txt) el.textContent = txt;
+    var disabled = !q || (findFullyScanned() && !arr.length);
     findState.prevBtn.classList.toggle('disabled', disabled);
     findState.nextBtn.classList.toggle('disabled', disabled);
   }
@@ -1225,17 +1275,13 @@ function buildInjectionScript(buttons, memos, bridge) {
   // safe to re-run after the virtualized list re-renders a row (which wipes our
   // injected marks). Off-screen rows can't be highlighted — they don't exist in
   // the DOM — so this mirrors what's visible, like a scroll-following overlay.
-  function findCurrentMatch() {
-    return (findState && findState.current >= 0) ? findState.matches[findState.current] : null;
-  }
-
   function refreshHighlights() {
     if (!findState || !findState.query) return;
     clearFindHighlights();
     var q = findState.query;
-    var cur = findCurrentMatch();
-    var curIndex = cur ? cur.index : -1;
-    var curOcc = cur ? cur.occ : -1;
+    var ck = findState.curKey;
+    var curIndex = ck ? ck.index : -1;
+    var curOcc = ck ? ck.occ : -1;
     var rows = findRenderedRows(findState.scr);
     for (var i = 0; i < rows.length; i++) {
       var occ = (rows[i].index === curIndex) ? curOcc : -1;
@@ -1253,39 +1299,70 @@ function buildInjectionScript(buttons, memos, bridge) {
     findState.keepTimer = setInterval(function () {
       if (!findState) return;
       tries++;
-      var cur = findCurrentMatch();
-      var row = cur ? findRowByIndex(findState.scr, cur.index) : null;
+      var ck = findState.curKey;
+      var row = ck ? findRowByIndex(findState.scr, ck.index) : null;
       if (row && !row.querySelector('mark.cpx-find-current')) refreshHighlights();
       if (tries >= 12) { clearInterval(findState.keepTimer); findState.keepTimer = null; }
     }, 150);
   }
 
-  function findGoto(i) {
-    if (!findState || !findState.matches.length) return;
-    var n = findState.matches.length;
-    i = ((i % n) + n) % n;
-    findState.current = i;
+  // Land on a specific match key: scroll its row into view, then highlight that
+  // occurrence as current. A newer navigation bumps navSeq and cancels any scroll
+  // still in flight so consecutive jumps don't run opposing wheel loops.
+  function findGotoKey(key) {
+    if (!findState || !key) return;
+    findState.curKey = key;
+    var stale = findNewNavToken();
     findUpdateCount();
-    var m = findState.matches[i];
     var scr = findState.scr;
-    findScrollToRow(scr, m.index, function (rowEl) {
-      if (!rowEl || !findState) return;
+    findScrollToRow(scr, key.index, stale, function (rowEl) {
+      if (stale() || !rowEl) return;
+      findRecordWindow();
       refreshHighlights();
-      var curRow = findRowByIndex(scr, m.index);
+      var curRow = findRowByIndex(scr, key.index);
       var cur = curRow && curRow.querySelector('mark.cpx-find-current');
       if (cur && cur.getBoundingClientRect) {
         var delta = findElementCenterDelta(scr, cur);
         if (Math.abs(delta) > 24) {
-          findWheelSettle(scr, delta, function () { if (findState) refreshHighlights(); });
+          findWheelSettle(scr, delta, function () { if (!stale()) { findRecordWindow(); refreshHighlights(); } });
         }
       }
       keepCurrentHighlight();
+      findUpdateCount();
     });
   }
 
-  function findNavigate(delta) {
-    if (!findState || !findState.matches.length) return;
-    findGoto(findState.current + delta);
+  // Move to the next (dir>0) or previous (dir<0) match. If the neighbour is
+  // already known within the scanned range, jump straight to it; otherwise scroll
+  // outward in that direction until the next match renders, then jump. At a fully
+  // scanned edge with none further, wrap around to the far end.
+  function findNavigate(dir) {
+    if (!findState || !findState.query) return;
+    var arr = findState.matches;
+    if (!arr.length && findFullyScanned()) return;
+    var pos = findPosOf(findState.curKey);
+    if (dir > 0 && pos >= 0 && pos + 1 < arr.length) { findGotoKey(arr[pos + 1]); return; }
+    if (dir < 0 && pos > 0) { findGotoKey(arr[pos - 1]); return; }
+
+    var stale = findNewNavToken();
+    findState.scanning = true;
+    findUpdateCount();
+    findScan(dir, true, stale, function () {
+      if (stale()) return;
+      var arr2 = findState.matches, p2 = findPosOf(findState.curKey);
+      if (dir > 0 && p2 >= 0 && p2 + 1 < arr2.length) { findState.scanning = false; findGotoKey(arr2[p2 + 1]); return; }
+      if (dir < 0 && p2 > 0) { findState.scanning = false; findGotoKey(arr2[p2 - 1]); return; }
+      // No more matches this way — we're wrapping around. Fully scan the OTHER
+      // end first, so the wrap lands on the true first/last match and the total
+      // becomes exact (drops the "+"), then jump there.
+      findScan(-dir, false, stale, function () {
+        if (stale()) return;
+        findState.scanning = false;
+        var arr3 = findState.matches;
+        if (!arr3.length) { findUpdateCount(); return; }
+        findGotoKey(dir > 0 ? arr3[0] : arr3[arr3.length - 1]);
+      });
+    });
   }
 
   function findRunSearch() {
@@ -1293,20 +1370,35 @@ function buildInjectionScript(buttons, memos, bridge) {
     var q = findState.query;
     clearFindHighlights();
     if (findState.keepTimer) { clearInterval(findState.keepTimer); findState.keepTimer = null; }
-    if (!q) { findState.matches = []; findState.current = -1; findState.scanning = false; findUpdateCount(); return; }
+    // Reset all lazy-search state for the new query, and bump navSeq so any scan
+    // or navigation still in flight from the previous query is cancelled.
+    findState.matches = [];
+    findState.seen = Object.create(null);
+    findState.seenCount = 0;
+    findState.total = -1;
+    findState.hitTop = false;
+    findState.hitBottom = false;
+    findState.curKey = null;
+    findState.scanning = false;
+    var stale = findNewNavToken();
+    if (!q) { findUpdateCount(); return; }
+
+    // Instant pass: match whatever is already rendered, landing on the nearest.
+    findRecordWindow();
+    if (findState.matches.length) { findGotoKey(findFirstVisibleKey()); return; }
+
+    // Nothing on screen matched: search outward (down, then up) for the first hit.
     findState.scanning = true;
     findUpdateCount();
-    var pre = findRenderedRows(findState.scr);
-    var preIndex = pre.length ? pre[0].index : 0;
-    var seq = ++findScanSeq;
-    scanConversation(findState.scr, q, seq, function (matches) {
-      if (!findState || seq !== findScanSeq) return;
-      findState.matches = matches;
-      findState.scanning = false;
-      findState.current = matches.length ? 0 : -1;
-      findUpdateCount();
-      if (matches.length) findGoto(0);
-      else findScrollToRow(findState.scr, preIndex, function () {});
+    findScan(1, true, stale, function (foundDown) {
+      if (stale()) return;
+      if (foundDown) { findState.scanning = false; findGotoKey(findState.matches[0]); return; }
+      findScan(-1, true, stale, function () {
+        if (stale()) return;
+        findState.scanning = false;
+        if (findState.matches.length) findGotoKey(findState.matches[0]);
+        else findUpdateCount();
+      });
     });
   }
 
@@ -1324,7 +1416,6 @@ function buildInjectionScript(buttons, memos, bridge) {
     clearFindHighlights();
     if (findSearchTimer) { clearTimeout(findSearchTimer); findSearchTimer = null; }
     if (findState.keepTimer) { clearInterval(findState.keepTimer); findState.keepTimer = null; }
-    findScanSeq++;
     window.removeEventListener('resize', findState.reposition, true);
     if (findState.widget && findState.widget.parentNode) findState.widget.parentNode.removeChild(findState.widget);
     findState = null;
@@ -1361,7 +1452,10 @@ function buildInjectionScript(buttons, memos, bridge) {
 
     findState = {
       session: session, scr: scr, widget: widget, input: input, countEl: count,
-      prevBtn: prev, nextBtn: next, query: '', matches: [], current: -1, scanning: false,
+      prevBtn: prev, nextBtn: next, query: '',
+      matches: [], curKey: null, seen: Object.create(null), seenCount: 0,
+      total: -1, hitTop: false, hitBottom: false,
+      scanning: false, navSeq: 0,
       reposition: function () { findPositionWidget(); }
     };
 
